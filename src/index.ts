@@ -1215,9 +1215,9 @@ function installSystemdJob(job: Job): void {
   writeFileSync(timerPath, createSystemdTimer(job))
 
   // Reload and enable
-  execSync("systemctl --user daemon-reload")
-  execSync(`systemctl --user enable opencode-job-${scopeId}-${job.slug}.timer`)
-  execSync(`systemctl --user start opencode-job-${scopeId}-${job.slug}.timer`)
+  execSync("systemctl --user daemon-reload", { stdio: "ignore" })
+  execSync(`systemctl --user enable opencode-job-${scopeId}-${job.slug}.timer`, { stdio: "ignore" })
+  execSync(`systemctl --user start opencode-job-${scopeId}-${job.slug}.timer`, { stdio: "ignore" })
 }
 
 function uninstallSystemdJob(job: Job): void {
