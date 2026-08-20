@@ -12,5 +12,7 @@
  * - Environment variable injection (PATH for node/npx)
  */
 import type { Plugin } from "@opencode-ai/plugin";
+export declare function slugify(name: string): string;
+export declare function notifyCompletedRuns(): Promise<void>;
 export declare const SchedulerPlugin: Plugin;
 export default SchedulerPlugin;
