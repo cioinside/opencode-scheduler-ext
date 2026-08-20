@@ -2296,6 +2296,122 @@ function getOpencodeVersion(opencodePath: string): string | null {
   }
 }
 
+type RunRecord = {
+  runId?: string
+  scopeId?: string
+  slug?: string
+  startedAt?: string
+  finishedAt?: string
+  durationMs?: number
+  status?: string
+  exitCode?: number | null
+  error?: string
+  logPath?: string
+  pid?: number
+}
+
+type PluginClient = {
+  tui: {
+    showToast: (params: {
+      title?: string
+      message?: string
+      variant?: "info" | "success" | "warning" | "error"
+      duration?: number
+    }) => Promise<unknown>
+    appendPrompt: (params: { text?: string }) => Promise<unknown>
+  }
+  session: {
+    prompt: (params: {
+      path: { id: string }
+      body: { noReply?: boolean; parts: Array<{ type: string; text?: string }> }
+    }) => Promise<unknown>
+  }
+}
+
+let pluginClient: PluginClient | null = null
+let lastChatSessionId: string | null = null
+const notifiedRunIds = new Set<string>()
+
+function formatRunSummary(run: RunRecord): string {
+  const slug = run.slug ?? "?"
+  const status = run.status ?? "unknown"
+  const durationSec = ((run.durationMs ?? 0) / 1000).toFixed(1)
+  const exit = run.exitCode ?? "?"
+  const err = run.error ? ` (${run.error})` : ""
+  const logPath = run.logPath ?? "n/a"
+  return `[scheduler-ext] '${slug}' finished: status=${status} exit=${exit} duration=${durationSec}s${err}\nLog: ${logPath}`
+}
+
+async function emitCompletionToast(run: RunRecord): Promise<void> {
+  if (!pluginClient) return
+  const ok = run.status === "success"
+  const slug = run.slug ?? "job"
+  const durationSec = ((run.durationMs ?? 0) / 1000).toFixed(1)
+  const errDetail = run.error ?? `exit ${run.exitCode ?? "?"}`
+  try {
+    await pluginClient.tui.showToast({
+      title: `${ok ? "[OK]" : "[FAIL]"} ${slug} finished`,
+      message: ok ? `Exit 0 in ${durationSec}s` : `Failed: ${errDetail}`,
+      variant: ok ? "success" : "error",
+      duration: 5000,
+    })
+  } catch {
+    // TUI may be closed; silent
+  }
+}
+
+async function injectCompletionIntoPrompt(run: RunRecord): Promise<void> {
+  if (!pluginClient) return
+  const summary = formatRunSummary(run)
+  try {
+    await pluginClient.tui.appendPrompt({ text: summary })
+  } catch {
+    // TUI may not have a prompt input (closed, in non-chat view)
+  }
+}
+
+export async function notifyCompletedRuns(): Promise<void> {
+  if (!pluginClient) return
+  if (!existsSync(SCOPES_DIR)) return
+  let scopes: string[]
+  try {
+    scopes = readdirSync(SCOPES_DIR)
+  } catch {
+    return
+  }
+  for (const scopeId of scopes) {
+    const scopeRunsDir = join(SCOPES_DIR, scopeId, "runs")
+    let files: string[]
+    try {
+      files = readdirSync(scopeRunsDir)
+    } catch {
+      continue
+    }
+    for (const file of files) {
+      if (!file.endsWith(".jsonl")) continue
+      const filePath = join(scopeRunsDir, file)
+      let content: string
+      try {
+        content = readFileSync(filePath, "utf-8")
+      } catch {
+        continue
+      }
+      const lines = content.split("\n").filter(Boolean)
+      if (!lines.length) continue
+      let record: RunRecord
+      try {
+        record = JSON.parse(lines[lines.length - 1]) as RunRecord
+      } catch {
+        continue
+      }
+      if (!record.runId || notifiedRunIds.has(record.runId)) continue
+      notifiedRunIds.add(record.runId)
+      await emitCompletionToast(record)
+      await injectCompletionIntoPrompt(record)
+    }
+  }
+}
+
 function runJobNow(job: Job): { startedAt: string; logPath: string; pid?: number; job: Job | null } {
   ensureDir(LOGS_DIR)
   ensureDir(scopeLogsDir(job.scopeId || deriveScopeId(job.workdir || homedir())))
@@ -2355,6 +2471,19 @@ function runJobNow(job: Job): { startedAt: string; logPath: string; pid?: number
       lastRunStatus: exitCode === 0 ? "success" : "failed",
       lastRunExitCode: exitCode,
       lastRunError: exitCode === 0 ? undefined : `Exit code ${exitCode ?? "unknown"}`,
+    })
+    const finishedAt = new Date().toISOString()
+    void emitCompletionToast({
+      runId: `manual-${startedAt}`,
+      slug: job.slug,
+      scopeId: job.scopeId,
+      startedAt,
+      finishedAt,
+      durationMs: Date.parse(finishedAt) - Date.parse(startedAt),
+      status: exitCode === 0 ? "success" : "failed",
+      exitCode: exitCode ?? null,
+      error: exitCode === 0 ? undefined : `Exit code ${exitCode ?? "unknown"}`,
+      logPath,
     })
   })
 
@@ -2534,8 +2663,13 @@ function getJobLogs(job: Job, options?: { tailLines?: number; maxChars?: number 
 
 // === PLUGIN ===
 
-export const SchedulerPlugin: Plugin = async () => {
+export const SchedulerPlugin: Plugin = async (input) => {
+  pluginClient = input.client as PluginClient
   return {
+    "chat.message": async (msgInput) => {
+      lastChatSessionId = msgInput.sessionID
+      await notifyCompletedRuns()
+    },
     tool: {
        schedule_job: tool({
            description:
