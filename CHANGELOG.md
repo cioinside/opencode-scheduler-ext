@@ -4,6 +4,29 @@ All notable changes to **opencode-scheduler-ext** are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.4.1-ext.2] — 2026-08-21
+
+### Changed (Feature C refinement)
+
+- **Batched notifications + persistent cutoff**: Feature C now emits ONE
+  consolidated toast + ONE prompt-append per `chat.message` hook fire,
+  covering all runs finished since the last notify. Replaces the v1.4.0
+  per-run flood that would emit N toasts for N historical runs on TUI
+  restart.
+- **Persisted state**: new file
+  `$OPENCODE_CONFIG/scheduler/last-notified-at.txt` (mode 0o600) stores
+  the ISO timestamp cutoff. Survives TUI restarts.
+- **Cold-start seeding**: when the state file is absent (first install
+  or after delete), `initializeLastNotified()` walks `runs/*.jsonl`
+  across all scopes and seeds to `MAX(finishedAt)`. The user does NOT
+  see history floods on first install.
+- Foreground `run_job` (Channel A) still emits one toast per run — the
+  user is at the TUI, single toasts are appropriate for interactive
+  completions.
+- Tests: 46/46 pass (12 new for batch + persistence + cold-start).
+- Knowledge record: `experience/opencode-plugin-batch-notifications-pattern`
+  in `experience-records` ragmir project.
+
 ## [1.4.0-ext.1] — 2026-08-21
 
 ### Security (backports from upstream PR #22)
@@ -25,12 +48,11 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- **Feature C**: TUI notifications when a scheduled run completes.
-  - `run_job` (foreground): toast appears in the active TUI on completion.
-  - Cron fallback (`supervisor.pl`): same toast via `curl POST /tui/show-toast`
-    after `waitpid`, so background runs notify too.
-  - `chat.message` hook: auto-injects the run summary into the most recent
-    chat session via `client.session.prompt({ noReply: true })`.
+- **Feature C** (v1, per-run): TUI notifications when a scheduled run
+  completes. `run_job` foreground → toast; cron/OS-scheduler runs →
+  per-run toast via `chat.message` hook; chat auto-inject via
+  `client.session.prompt({ noReply: true })`. Superseded by v1.4.1 batch
+  design.
 - Test suite (`bun test`) with 16 regression tests covering Patch A & B.
 - `SECURITY.md` documenting the threat model and fix history.
 - `CHANGELOG.md` (this file).
@@ -55,4 +77,5 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 See [upstream CHANGELOG](https://github.com/different-ai/opencode-scheduler)
 for the full 1.x history.
 
+[1.4.1-ext.2]: https://github.com/cioinside/opencode-scheduler-ext/releases/tag/v1.4.1-ext.2
 [1.4.0-ext.1]: https://github.com/cioinside/opencode-scheduler-ext/releases/tag/v1.4.0-ext.1
