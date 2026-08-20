@@ -45,6 +45,14 @@ function sectionBody(headerMarker: string): string {
   return SRC.slice(start, end)
 }
 
+function extractFnBody(name: string): string {
+  const re = new RegExp(
+    `(?:async\\s+)?function ${name}\\([^)]*\\)\\s*:\\s*(?:\\{[^}]*\\}|[^{]+)\\s*\\{([\\s\\S]*?)\\n\\}`,
+  )
+  const m = SRC.match(re)
+  return m ? m[1] : ""
+}
+
 describe("Feature C: plugin entry captures client + exposes chat.message hook", () => {
   test("SchedulerPlugin accepts the input parameter (PluginInput)", () => {
     expect(SRC).toMatch(/export const SchedulerPlugin: Plugin = async \(input\) =>/)
@@ -93,23 +101,23 @@ describe("Feature C: TUI helpers exist with expected SDK shapes", () => {
     expect(SRC).toMatch(/export async function notifyCompletedRuns/)
   })
 
-  test("notifyCompletedRuns walks SCOPES_DIR/<scope>/runs/*.jsonl and parses all lines", () => {
-    const body = functionBody(/export async function notifyCompletedRuns\([^)]*\)\s*:\s*Promise<void>\s*\{/)
+  test("collectFreshRuns walks SCOPES_DIR/<scope>/runs/*.jsonl and parses all lines", () => {
+    const body = extractFnBody("collectFreshRuns")
     expect(body).toMatch(/SCOPES_DIR/)
     expect(body).toMatch(/\.jsonl/)
     expect(body).toMatch(/readdirSync\(scopeRunsDir\)/)
     expect(body).toMatch(/for\s*\(\s*const\s+line\s+of\s+content\.split/)
   })
 
-  test("notifyCompletedRuns filters by finishedAt > lastNotifiedAt cutoff", () => {
-    const body = functionBody(/export async function notifyCompletedRuns\([^)]*\)\s*:\s*Promise<void>\s*\{/)
+  test("collectFreshRuns filters by finishedAt > lastNotifiedAt cutoff", () => {
+    const body = extractFnBody("collectFreshRuns")
     expect(body).toMatch(/cutoff/)
     expect(body).toMatch(/record\.finishedAt\s*<=\s*cutoff/)
     expect(body).toMatch(/continue/)
   })
 
-  test("notifyCompletedRuns tracks maxFinishedAt across all new records", () => {
-    const body = functionBody(/export async function notifyCompletedRuns\([^)]*\)\s*:\s*Promise<void>\s*\{/)
+  test("collectFreshRuns tracks maxFinishedAt across all new records", () => {
+    const body = extractFnBody("collectFreshRuns")
     expect(body).toMatch(/maxFinishedAt/)
     expect(body).toMatch(/record\.finishedAt\s*>\s*maxFinishedAt/)
   })
@@ -257,9 +265,112 @@ describe("Feature C: structural types match the SDK shape", () => {
     expect(SRC).toMatch(/variant\?:\s*["']info["']\s*\|\s*["']success["']\s*\|\s*["']warning["']\s*\|\s*["']error["']/)
   })
 
-  test("PluginClient.session.prompt signature matches SDK POST /session/{id}/prompt_async", () => {
+test("PluginClient.session.prompt signature matches SDK POST /session/{id}/prompt_async", () => {
     expect(SRC).toMatch(/path:\s*\{\s*id:\s*string\s*\}/)
     expect(SRC).toMatch(/body:\s*\{\s*noReply\?:\s*boolean/)
     expect(SRC).toMatch(/parts:\s*Array<\{\s*type:\s*string/)
+  })
+})
+
+describe("Wave 7: Job interface stores sessionId for notification routing", () => {
+  test("Job interface has sessionId?: string field", () => {
+    expect(SRC).toMatch(/interface Job\s*\{[\s\S]*?sessionId\?:\s*string/)
+  })
+})
+
+describe("Wave 7: SchedulerConfig supports autoNotify.mode", () => {
+  test("SchedulerConfig has autoNotify field with off|silent|active mode union", () => {
+    expect(SRC).toMatch(
+      /type SchedulerConfig\s*=\s*\{[\s\S]*?autoNotify\?:\s*\{[\s\S]*?mode\?:\s*["']off["']\s*\|\s*["']silent["']\s*\|\s*["']active["']/,
+    )
+  })
+})
+
+describe("Wave 7: lookupSessionForJob reads jobs.json sessionId", () => {
+  test("lookupSessionForJob exists and reads jobs/<slug>.json", () => {
+    const body = extractFnBody("lookupSessionForJob")
+    expect(body).toMatch(/SCOPES_DIR/)
+    expect(body).toMatch(/jobs/)
+    expect(body).toMatch(/\.json/)
+    expect(body).toMatch(/job\.sessionId/)
+  })
+})
+
+describe("Wave 7: collectFreshRuns + groupFreshBySession helpers", () => {
+  test("collectFreshRuns returns {fresh, maxFinishedAt} tuple", () => {
+    const body = extractFnBody("collectFreshRuns")
+    expect(body).toMatch(/fresh:\s*RunRecord\[\]/)
+    expect(body).toMatch(/maxFinishedAt:\s*string\s*\|\s*null/)
+    expect(body).toMatch(/return\s*\{\s*fresh,\s*maxFinishedAt\s*\}/)
+  })
+
+  test("groupFreshBySession buckets records by lookupSessionForJob result", () => {
+    const body = extractFnBody("groupFreshBySession")
+    expect(body).toMatch(/new Map/)
+    expect(body).toMatch(/lookupSessionForJob/)
+    expect(body).toMatch(/map\.set/)
+  })
+})
+
+describe("Wave 7: per-session routing helpers", () => {
+  test("injectBatchIntoSession uses session.prompt with noReply:true and formatBatchSummary", () => {
+    const body = functionBody(/async function injectBatchIntoSession\([^)]*\)\s*:\s*Promise<void>\s*\{/)
+    expect(body).toMatch(/pluginClient(\??)\.session\.prompt/)
+    expect(body).toMatch(/noReply:\s*true/)
+    expect(body).toMatch(/formatBatchSummary\(/)
+    expect(body).toMatch(/try\s*\{[\s\S]*?\}\s*catch\s*\{/)
+  })
+
+  test("triggerAgentOnSession uses session.prompt WITHOUT noReply (triggers model)", () => {
+    const body = functionBody(/async function triggerAgentOnSession\([^)]*\)\s*:\s*Promise<void>\s*\{/)
+    expect(body).toMatch(/pluginClient(\??)\.session\.prompt/)
+    expect(body).not.toMatch(/noReply:\s*true/)
+    expect(body).toMatch(/Process the completed jobs/)
+    expect(body).toMatch(/Do not modify jobs unless asked/)
+  })
+
+  test("notifyCompletedRuns groups by session and routes per-session", () => {
+    const body = functionBody(/export async function notifyCompletedRuns\([^)]*\)\s*:\s*Promise<void>\s*\{/)
+    expect(body).toMatch(/collectFreshRuns\(\)/)
+    expect(body).toMatch(/groupFreshBySession\(/)
+    expect(body).toMatch(/injectBatchIntoSession\(/)
+    expect(body).toMatch(/lastChatSessionId/)
+    expect(body).toMatch(/emitBatchToast\(/)
+    expect(body).toMatch(/injectBatchIntoPrompt\(/)
+  })
+})
+
+describe("Wave 7: autoNotifyOnResume + SchedulerPlugin wiring", () => {
+  test("autoNotifyOnResume reads config.autoNotify.mode with active default and off early-exit", () => {
+    const body = functionBody(/async function autoNotifyOnResume\([^)]*\)\s*:\s*Promise<void>\s*\{/)
+    expect(body).toMatch(/loadSchedulerConfig\(\)/)
+    expect(body).toMatch(/autoNotify/)
+    expect(body).toMatch(/\?\?\s*["']active["']/)
+    expect(body).toMatch(/if\s*\(\s*mode\s*===\s*["']off["']\)\s*return/)
+  })
+
+  test("autoNotifyOnResume routes per-session + triggers model in active mode only", () => {
+    const body = functionBody(/async function autoNotifyOnResume\([^)]*\)\s*:\s*Promise<void>\s*\{/)
+    expect(body).toMatch(/collectFreshRuns\(\)/)
+    expect(body).toMatch(/groupFreshBySession\(/)
+    expect(body).toMatch(/injectBatchIntoSession\(/)
+    expect(body).toMatch(/triggerAgentOnSession\(/)
+    expect(body).toMatch(/mode\s*===\s*["']active["']/)
+  })
+
+  test("SchedulerPlugin calls autoNotifyOnResume on init and registers tool.execute.before hook", () => {
+    const body = pluginBody()
+    expect(body).toMatch(/void\s+autoNotifyOnResume\(\)/)
+    expect(body).toMatch(/["']tool\.execute\.before["']/)
+    expect(body).toMatch(/lastToolSessionId\s*=\s*sid/)
+  })
+
+  test("schedule_job execute captures sessionId from lastToolSessionId ?? lastChatSessionId", () => {
+    const body = sectionBody("async execute(args) {")
+    expect(body).toMatch(/lastToolSessionId\s*\?\?\s*lastChatSessionId/)
+  })
+
+  test("module-level lastToolSessionId var is declared alongside lastChatSessionId", () => {
+    expect(SRC).toMatch(/^\s*let lastToolSessionId:\s*string\s*\|\s*null\s*=\s*null/m)
   })
 })

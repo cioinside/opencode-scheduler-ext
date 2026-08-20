@@ -22,7 +22,7 @@
   so `systemctl --user enable` no longer leaks `Created symlink ...` into
   the opencode TUI as a synthetic prompt. 4 regression tests in
   `test/install-systemd.test.ts`.
-- **TUI notifications on run completion** (Feature C, v1.4.1-ext.2+):
+- **TUI notifications on run completion** (Feature C, v1.5.0-ext.1+):
   foreground `run_job` shows a single toast on completion; background
   cron/OS-scheduler runs are surfaced via the `chat.message` hook as
   ONE consolidated toast + ONE prompt-input summary per batch of new
@@ -31,6 +31,21 @@
   TUI restarts do not flood the user with historical completions.
   Cold-start seeding initializes the cutoff to `MAX(finishedAt)` across
   existing runs to avoid history floods on first install.
+- **Session-bound routing + auto-resume** (Feature C v1.5.0-ext.1):
+  each job remembers the chat session that scheduled it (captured via a
+  new `tool.execute.before` hook). Completion summaries route to the
+  **originating session** via `client.session.prompt({ noReply: true })`,
+  so a user in unrelated chat B does not see job completions scheduled
+  in chat A. On plugin init, `autoNotifyOnResume()` scans for finished
+  runs since `lastNotifiedAt` and (in `active` mode, the default) also
+  fires an additional `client.session.prompt({...})` so the LLM starts
+  processing the summary in each owning session without waiting for user
+  input. Configure via `opencode-scheduler.json`:
+  ```json
+  { "autoNotify": { "mode": "active" } }
+  ```
+  Values: `off` (skip auto-resume), `silent` (inject summary, do not
+  trigger model), `active` (inject + trigger model — default).
 - **Source maps** in the published `dist/` (`--sourcemap=external`).
 - **CI** (`.github/workflows/ci.yml`) running `bun install` + `bun test`
   + `bun run build` on every push.
@@ -44,6 +59,29 @@ This fork writes the following files under `~/.config/opencode/scheduler/`:
   Delete to reset notification history (the next `chat.message` hook
   will re-notify all runs finished strictly after `MAX(finishedAt)` in
   the existing `runs/*.jsonl`).
+- `jobs/<scopeId>/<slug>.json` — each scheduled job now also stores
+  `sessionId` (the chat session that scheduled it), used by
+  `lookupSessionForJob` for per-session routing in v1.5.0-ext.1+.
+
+## Config
+
+`opencode-scheduler.json` (under `~/.config/opencode/`):
+
+```jsonc
+{
+  "env": {
+    "preserve": ["PATH"],
+    "set": { "LANG": "C.UTF-8" }
+  },
+  "autoNotify": {
+    "mode": "active"  // off | silent | active — default "active"
+  }
+}
+```
+
+- `env` is forwarded to scheduled runs (see upstream docs).
+- `autoNotify.mode` controls `autoNotifyOnResume()` on plugin init
+  (v1.5.0-ext.1+).
 
 ## Install
 

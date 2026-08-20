@@ -4,6 +4,44 @@ All notable changes to **opencode-scheduler-ext** are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.5.0-ext.1] — 2026-08-21
+
+### Added (Feature C refinement: session-bound routing + auto-resume)
+
+- **Session-bound notifications**: each job now records the chat session
+  ID that scheduled it (captured by a new `tool.execute.before` hook
+  with `lastChatSessionId` fallback). When a run completes, the
+  completion summary is routed via `client.session.prompt({ noReply: true })`
+  to the **originating session**, not whichever chat the user happens to
+  be in. Jobs scheduled from session A show up in session A; if the user
+  is currently in session B (unrelated work), session B sees no summary.
+- **`autoNotifyOnResume()` on plugin init**: when the opencode runtime
+  starts, the plugin scans `runs/*.jsonl` for runs finished since
+  `lastNotifiedAt` and routes them per-session. In `active` mode (the
+  default), it then fires an additional `client.session.prompt({...})`
+  without `noReply` so the LLM starts processing the summary in each
+  owning session without waiting for the user to type. Configurable via
+  `opencode-scheduler.json` (`autoNotify.mode = off | silent | active`).
+- **Config schema**: `SchedulerConfig.autoNotify.mode` (default `active`).
+  `silent` injects the summary but does not trigger the model; `off`
+  disables auto-resume notifications entirely. Per-session routing still
+  happens on `chat.message` regardless of `autoNotify.mode`.
+- **`lookupSessionForJob(scopeId, slug)`** helper reads `jobs/<slug>.json`
+  to recover the originating `sessionId`. Returns `null` for jobs
+  scheduled before this version (no migration; old jobs fall back to the
+  current chat prompt path).
+- **Double-fire prevention**: `autoNotifyOnResume` updates
+  `lastNotifiedAt` after routing so the next `chat.message` hook call
+  does not re-notify the same runs.
+- Tests: 59/59 pass (13 new in `test/plugin-entry.test.ts` covering
+  `Job.sessionId`, `SchedulerConfig.autoNotify`, `lookupSessionForJob`,
+  `collectFreshRuns`, `groupFreshBySession`, `injectBatchIntoSession`,
+  `triggerAgentOnSession`, `autoNotifyOnResume`, `tool.execute.before`,
+  and `lastToolSessionId` module var).
+- Knowledge record:
+  `experience/opencode-plugin-session-bound-routing` in `experience-records`
+  ragmir project.
+
 ## [1.4.1-ext.2] — 2026-08-21
 
 ### Changed (Feature C refinement)

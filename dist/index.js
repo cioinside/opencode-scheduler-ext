@@ -14153,6 +14153,7 @@ function getOpencodeVersion(opencodePath) {
 }
 var pluginClient = null;
 var lastChatSessionId = null;
+var lastToolSessionId = null;
 var lastNotifiedAt = null;
 function loadLastNotified() {
   try {
@@ -14209,6 +14210,20 @@ function initializeLastNotified() {
     }
   } catch {}
   return latest ?? new Date().toISOString();
+}
+function lookupSessionForJob(scopeId, slug) {
+  if (!scopeId || !slug)
+    return null;
+  const path = join(SCOPES_DIR, scopeId, "jobs", `${slug}.json`);
+  try {
+    if (!existsSync(path))
+      return null;
+    const raw = readFileSync(path, "utf-8");
+    const job = JSON.parse(raw);
+    return job.sessionId ?? null;
+  } catch {
+    return null;
+  }
 }
 function formatBatchSummary(records) {
   const lines = [];
@@ -14281,19 +14296,17 @@ async function injectBatchIntoPrompt(records) {
     await pluginClient.tui.appendPrompt({ text: summary });
   } catch {}
 }
-async function notifyCompletedRuns() {
-  if (!pluginClient)
-    return;
-  if (!existsSync(SCOPES_DIR))
-    return;
+function collectFreshRuns() {
   const cutoff = lastNotifiedAt;
   const fresh = [];
   let maxFinishedAt = null;
+  if (!existsSync(SCOPES_DIR))
+    return { fresh, maxFinishedAt };
   let scopes;
   try {
     scopes = readdirSync(SCOPES_DIR);
   } catch {
-    return;
+    return { fresh, maxFinishedAt };
   }
   for (const scopeId of scopes) {
     const scopeRunsDir2 = join(SCOPES_DIR, scopeId, "runs");
@@ -14332,11 +14345,89 @@ async function notifyCompletedRuns() {
       }
     }
   }
+  return { fresh, maxFinishedAt };
+}
+function groupFreshBySession(records) {
+  const map2 = new Map;
+  for (const r of records) {
+    const sid = lookupSessionForJob(r.scopeId, r.slug);
+    const list = map2.get(sid) ?? [];
+    list.push(r);
+    map2.set(sid, list);
+  }
+  return map2;
+}
+async function injectBatchIntoSession(sessionId, records) {
+  if (!pluginClient || records.length === 0)
+    return;
+  try {
+    await pluginClient.session.prompt({
+      path: { id: sessionId },
+      body: { noReply: true, parts: [{ type: "text", text: formatBatchSummary(records) }] }
+    });
+  } catch {}
+}
+async function triggerAgentOnSession(sessionId) {
+  if (!pluginClient)
+    return;
+  try {
+    await pluginClient.session.prompt({
+      path: { id: sessionId },
+      body: {
+        parts: [
+          {
+            type: "text",
+            text: "[scheduler-ext] Process the completed jobs in the previous summary. Report outcomes, flag failures, suggest next steps. Do not modify jobs unless asked."
+          }
+        ]
+      }
+    });
+  } catch {}
+}
+async function notifyCompletedRuns() {
+  if (!pluginClient)
+    return;
+  const { fresh, maxFinishedAt } = collectFreshRuns();
   if (fresh.length === 0 || !maxFinishedAt)
     return;
   fresh.sort((a, b) => a.finishedAt < b.finishedAt ? -1 : 1);
   await emitBatchToast(fresh);
-  await injectBatchIntoPrompt(fresh);
+  const bySession = groupFreshBySession(fresh);
+  const currentSessionRecords = [];
+  for (const [sid, records] of bySession) {
+    if (!sid || sid === lastChatSessionId) {
+      currentSessionRecords.push(...records);
+    } else {
+      await injectBatchIntoSession(sid, records);
+    }
+  }
+  if (currentSessionRecords.length > 0) {
+    await injectBatchIntoPrompt(currentSessionRecords);
+  }
+  lastNotifiedAt = maxFinishedAt;
+  saveLastNotified(maxFinishedAt);
+}
+async function autoNotifyOnResume() {
+  if (!pluginClient)
+    return;
+  const config2 = loadSchedulerConfig();
+  const mode = config2.autoNotify?.mode ?? "active";
+  if (mode === "off")
+    return;
+  const { fresh, maxFinishedAt } = collectFreshRuns();
+  if (fresh.length === 0 || !maxFinishedAt)
+    return;
+  fresh.sort((a, b) => a.finishedAt < b.finishedAt ? -1 : 1);
+  await emitBatchToast(fresh);
+  const bySession = groupFreshBySession(fresh);
+  for (const [sid, records] of bySession) {
+    if (!sid)
+      continue;
+    await injectBatchIntoSession(sid, records);
+    if (mode === "active") {
+      await triggerAgentOnSession(sid);
+    }
+  }
   lastNotifiedAt = maxFinishedAt;
   saveLastNotified(maxFinishedAt);
 }
@@ -14572,10 +14663,17 @@ var SchedulerPlugin = async (input) => {
       saveLastNotified(lastNotifiedAt);
     }
   }
+  autoNotifyOnResume();
   return {
     "chat.message": async (msgInput) => {
       lastChatSessionId = msgInput.sessionID;
       await notifyCompletedRuns();
+    },
+    "tool.execute.before": async (input2) => {
+      const sid = input2?.sessionID;
+      if (sid) {
+        lastToolSessionId = sid;
+      }
     },
     tool: {
       schedule_job: tool({
@@ -14663,6 +14761,7 @@ var SchedulerPlugin = async (input) => {
             const msg = error45 instanceof Error ? error45.message : String(error45);
             return errorResult(format, `Invalid cron schedule: ${msg}`);
           }
+          const sessionId = lastToolSessionId ?? lastChatSessionId ?? undefined;
           const job = {
             scopeId,
             slug,
@@ -14674,6 +14773,7 @@ var SchedulerPlugin = async (input) => {
             workdir,
             attachUrl,
             timeoutSeconds: args.timeoutSeconds,
+            sessionId,
             createdAt: new Date().toISOString()
           };
           try {
@@ -15193,4 +15293,4 @@ export {
   slugify
 };
 
-//# debugId=4EAAE217049B461064756E2164756E21
+//# debugId=D0A3B5486B1DD1A764756E2164756E21

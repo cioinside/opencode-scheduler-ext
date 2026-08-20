@@ -368,6 +368,9 @@ type SchedulerEnvConfig = {
 
 type SchedulerConfig = {
   env?: SchedulerEnvConfig
+  autoNotify?: {
+    mode?: "off" | "silent" | "active"
+  }
 }
 
 interface JobRunSpec {
@@ -398,6 +401,9 @@ interface Job {
   // Scope isolates jobs per opencode "owner" (usually the workspace workdir).
   // Jobs scheduled from different workdirs should not collide.
   scopeId?: string
+
+  // Chat session that scheduled this job; used for per-session notification routing.
+  sessionId?: string
 
   slug: string
   name: string
@@ -2331,6 +2337,7 @@ type PluginClient = {
 
 let pluginClient: PluginClient | null = null
 let lastChatSessionId: string | null = null
+let lastToolSessionId: string | null = null
 let lastNotifiedAt: string | null = null
 
 function loadLastNotified(): string | null {
@@ -2391,6 +2398,19 @@ function initializeLastNotified(): string {
     // ignore — fall through to now()
   }
   return latest ?? new Date().toISOString()
+}
+
+function lookupSessionForJob(scopeId: string | undefined, slug: string | undefined): string | null {
+  if (!scopeId || !slug) return null
+  const path = join(SCOPES_DIR, scopeId, "jobs", `${slug}.json`)
+  try {
+    if (!existsSync(path)) return null
+    const raw = readFileSync(path, "utf-8")
+    const job = JSON.parse(raw) as Partial<Job>
+    return job.sessionId ?? null
+  } catch {
+    return null
+  }
 }
 
 function formatRunSummary(run: RunRecord): string {
@@ -2490,19 +2510,18 @@ async function injectBatchIntoPrompt(records: RunRecord[]): Promise<void> {
   }
 }
 
-export async function notifyCompletedRuns(): Promise<void> {
-  if (!pluginClient) return
-  if (!existsSync(SCOPES_DIR)) return
-
+function collectFreshRuns(): { fresh: RunRecord[]; maxFinishedAt: string | null } {
   const cutoff = lastNotifiedAt
   const fresh: RunRecord[] = []
   let maxFinishedAt: string | null = null
+
+  if (!existsSync(SCOPES_DIR)) return { fresh, maxFinishedAt }
 
   let scopes: string[]
   try {
     scopes = readdirSync(SCOPES_DIR)
   } catch {
-    return
+    return { fresh, maxFinishedAt }
   }
 
   for (const scopeId of scopes) {
@@ -2539,12 +2558,101 @@ export async function notifyCompletedRuns(): Promise<void> {
     }
   }
 
+  return { fresh, maxFinishedAt }
+}
+
+function groupFreshBySession(records: RunRecord[]): Map<string | null, RunRecord[]> {
+  const map = new Map<string | null, RunRecord[]>()
+  for (const r of records) {
+    const sid = lookupSessionForJob(r.scopeId, r.slug)
+    const list = map.get(sid) ?? []
+    list.push(r)
+    map.set(sid, list)
+  }
+  return map
+}
+
+async function injectBatchIntoSession(sessionId: string, records: RunRecord[]): Promise<void> {
+  if (!pluginClient || records.length === 0) return
+  try {
+    await pluginClient.session.prompt({
+      path: { id: sessionId },
+      body: { noReply: true, parts: [{ type: "text", text: formatBatchSummary(records) }] },
+    })
+  } catch {
+    // session may be closed/deleted; silent
+  }
+}
+
+async function triggerAgentOnSession(sessionId: string): Promise<void> {
+  if (!pluginClient) return
+  try {
+    await pluginClient.session.prompt({
+      path: { id: sessionId },
+      body: {
+        parts: [
+          {
+            type: "text",
+            text: "[scheduler-ext] Process the completed jobs in the previous summary. Report outcomes, flag failures, suggest next steps. Do not modify jobs unless asked.",
+          },
+        ],
+      },
+    })
+  } catch {}
+}
+
+export async function notifyCompletedRuns(): Promise<void> {
+  if (!pluginClient) return
+
+  const { fresh, maxFinishedAt } = collectFreshRuns()
   if (fresh.length === 0 || !maxFinishedAt) return
 
   fresh.sort((a, b) => (a.finishedAt! < b.finishedAt! ? -1 : 1))
 
   await emitBatchToast(fresh)
-  await injectBatchIntoPrompt(fresh)
+
+  const bySession = groupFreshBySession(fresh)
+  const currentSessionRecords: RunRecord[] = []
+
+  for (const [sid, records] of bySession) {
+    if (!sid || sid === lastChatSessionId) {
+      currentSessionRecords.push(...records)
+    } else {
+      await injectBatchIntoSession(sid, records)
+    }
+  }
+
+  if (currentSessionRecords.length > 0) {
+    await injectBatchIntoPrompt(currentSessionRecords)
+  }
+
+  lastNotifiedAt = maxFinishedAt
+  saveLastNotified(maxFinishedAt)
+}
+
+async function autoNotifyOnResume(): Promise<void> {
+  if (!pluginClient) return
+
+  const config = loadSchedulerConfig()
+  const mode = config.autoNotify?.mode ?? "active"
+  if (mode === "off") return
+
+  const { fresh, maxFinishedAt } = collectFreshRuns()
+  if (fresh.length === 0 || !maxFinishedAt) return
+
+  fresh.sort((a, b) => (a.finishedAt! < b.finishedAt! ? -1 : 1))
+
+  await emitBatchToast(fresh)
+
+  const bySession = groupFreshBySession(fresh)
+
+  for (const [sid, records] of bySession) {
+    if (!sid) continue
+    await injectBatchIntoSession(sid, records)
+    if (mode === "active") {
+      await triggerAgentOnSession(sid)
+    }
+  }
 
   lastNotifiedAt = maxFinishedAt
   saveLastNotified(maxFinishedAt)
@@ -2810,10 +2918,17 @@ export const SchedulerPlugin: Plugin = async (input) => {
       saveLastNotified(lastNotifiedAt)
     }
   }
+  void autoNotifyOnResume()
   return {
     "chat.message": async (msgInput) => {
       lastChatSessionId = msgInput.sessionID
       await notifyCompletedRuns()
+    },
+    "tool.execute.before": async (input) => {
+      const sid = (input as { sessionID?: string })?.sessionID
+      if (sid) {
+        lastToolSessionId = sid
+      }
     },
     tool: {
        schedule_job: tool({
@@ -2937,6 +3052,7 @@ export const SchedulerPlugin: Plugin = async (input) => {
              return errorResult(format, `Invalid cron schedule: ${msg}`)
            }
 
+            const sessionId = lastToolSessionId ?? lastChatSessionId ?? undefined
             const job: Job = {
               scopeId,
               slug,
@@ -2949,6 +3065,7 @@ export const SchedulerPlugin: Plugin = async (input) => {
               workdir,
               attachUrl,
               timeoutSeconds: args.timeoutSeconds,
+              sessionId,
               createdAt: new Date().toISOString(),
             }
 
