@@ -1,4 +1,52 @@
-# opencode-scheduler
+# opencode-scheduler-ext
+
+> **Fork notice.** This is a maintained fork of
+> [`different-ai/opencode-scheduler`](https://github.com/different-ai/opencode-scheduler)
+> (MIT, by Benjamin Shafii & contributors). It backports upstream's pending
+> command-injection fix (PR #22), adds a regression test suite, suppresses
+> the `Created symlink` stdout leak that corrupts the opencode agent TUI,
+> and emits a toast notification in the TUI when a scheduled run completes.
+> See [CHANGELOG.md](./CHANGELOG.md) and [SECURITY.md](./SECURITY.md) for
+> the full delta. Original code © 2025 Different AI — MIT.
+
+## What this fork adds on top of upstream 1.3.0
+
+- **Security backport** (Patch B, cherry-picked from upstream PR #22):
+  `schedule_job.source` is now run through `slugify()`, and every OS
+  scheduler call (`launchctl`, `systemctl`, `schtasks`) uses `execFileSync`
+  + argument array instead of `execSync` shell strings. Closes a
+  same-user command-injection vector. 8 regression tests in
+  `test/security.test.ts`.
+- **Stdout suppression** (Patch A): `installSystemdJob`'s
+  `daemon-reload` / `enable` / `start` calls all pass `{ stdio: "ignore" }`,
+  so `systemctl --user enable` no longer leaks `Created symlink ...` into
+  the opencode TUI as a synthetic prompt. 4 regression tests in
+  `test/install-systemd.test.ts`.
+- **TUI notifications on run completion** (Feature C): `run_job` (foreground)
+  shows a toast when the run finishes; the cron fallback supervisor emits
+  the same toast via `curl POST /tui/show-toast` so background runs also
+  notify; a `chat.message` hook auto-injects the run summary into the
+  most recent chat session via `client.session.prompt({ noReply: true })`.
+- **Source maps** in the published `dist/` (`--sourcemap=external`).
+- **CI** (`.github/workflows/ci.yml`) running `bun install` + `bun test`
+  + `bun run build` on every push.
+
+## Install
+
+Add to your `opencode.json`:
+
+```json
+{
+  "plugin": ["opencode-scheduler-ext"]
+}
+```
+
+Then `npm i opencode-scheduler-ext` (or use a workspace alias if you
+publish this fork to a private registry).
+
+---
+
+# opencode-scheduler (upstream description follows)
 
 Run AI agents on a schedule. Set up recurring tasks that execute autonomously—even when you're away.
 
@@ -10,7 +58,7 @@ This is an [OpenCode](https://opencode.ai) plugin that uses your OS's native sch
 
 As of `v1.2.0`, jobs are scoped by `workdir` (so different projects don't collide), and scheduled runs are supervised (no overlap + optional timeout).
 
-## Install
+## Install (legacy single-plugin snippet — see top of file for the fork)
 
 Add to your `opencode.json`:
 
