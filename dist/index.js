@@ -12347,6 +12347,7 @@ var SCHEDULER_DIR = join(OPENCODE_CONFIG, "scheduler");
 var SCOPES_DIR = join(SCHEDULER_DIR, "scopes");
 var SUPERVISOR_PATH = join(SCHEDULER_DIR, "supervisor.pl");
 var SCHEDULER_CONFIG = join(OPENCODE_CONFIG, "opencode-scheduler.json");
+var LAST_NOTIFIED_PATH = join(SCHEDULER_DIR, "last-notified-at.txt");
 var IS_MAC = platform() === "darwin";
 var IS_LINUX = platform() === "linux";
 var IS_WINDOWS = platform() === "win32";
@@ -14152,16 +14153,79 @@ function getOpencodeVersion(opencodePath) {
 }
 var pluginClient = null;
 var lastChatSessionId = null;
-var notifiedRunIds = new Set;
-function formatRunSummary(run) {
-  const slug = run.slug ?? "?";
-  const status = run.status ?? "unknown";
-  const durationSec = ((run.durationMs ?? 0) / 1000).toFixed(1);
-  const exit = run.exitCode ?? "?";
-  const err = run.error ? ` (${run.error})` : "";
-  const logPath = run.logPath ?? "n/a";
-  return `[scheduler-ext] '${slug}' finished: status=${status} exit=${exit} duration=${durationSec}s${err}
-Log: ${logPath}`;
+var lastNotifiedAt = null;
+function loadLastNotified() {
+  try {
+    if (!existsSync(LAST_NOTIFIED_PATH))
+      return null;
+    const raw = readFileSync(LAST_NOTIFIED_PATH, "utf-8").trim();
+    if (!raw)
+      return null;
+    const t = Date.parse(raw);
+    return Number.isFinite(t) ? raw : null;
+  } catch {
+    return null;
+  }
+}
+function saveLastNotified(iso) {
+  try {
+    ensureDir(SCHEDULER_DIR);
+    writeFileSync(LAST_NOTIFIED_PATH, iso + `
+`, { mode: 384 });
+  } catch {}
+}
+function initializeLastNotified() {
+  let latest = null;
+  try {
+    if (existsSync(SCOPES_DIR)) {
+      for (const scopeId of readdirSync(SCOPES_DIR)) {
+        const scopeRunsDir2 = join(SCOPES_DIR, scopeId, "runs");
+        let files;
+        try {
+          files = readdirSync(scopeRunsDir2);
+        } catch {
+          continue;
+        }
+        for (const file2 of files) {
+          if (!file2.endsWith(".jsonl"))
+            continue;
+          let content;
+          try {
+            content = readFileSync(join(scopeRunsDir2, file2), "utf-8");
+          } catch {
+            continue;
+          }
+          for (const line of content.split(`
+`).filter(Boolean)) {
+            try {
+              const r = JSON.parse(line);
+              if (r.finishedAt && (!latest || r.finishedAt > latest)) {
+                latest = r.finishedAt;
+              }
+            } catch {}
+          }
+        }
+      }
+    }
+  } catch {}
+  return latest ?? new Date().toISOString();
+}
+function formatBatchSummary(records) {
+  const lines = [];
+  const noun = records.length === 1 ? "job" : "jobs";
+  lines.push(`[scheduler-ext] ${records.length} ${noun} completed since last check:`);
+  for (const r of records) {
+    const ok = r.status === "success";
+    const slug = r.slug ?? "?";
+    const dur = ((r.durationMs ?? 0) / 1000).toFixed(1);
+    const exit = r.exitCode ?? "?";
+    const err = r.error ? ` (${r.error})` : "";
+    lines.push(`  ${ok ? "[OK]" : "[FAIL]"} ${slug} \u2014 ${dur}s, exit ${exit}${err}`);
+  }
+  lines.push("");
+  lines.push("Use list_jobs / get_job / get_logs to inspect.");
+  return lines.join(`
+`);
 }
 async function emitCompletionToast(run) {
   if (!pluginClient)
@@ -14179,10 +14243,40 @@ async function emitCompletionToast(run) {
     });
   } catch {}
 }
-async function injectCompletionIntoPrompt(run) {
-  if (!pluginClient)
+async function emitBatchToast(records) {
+  if (!pluginClient || records.length === 0)
     return;
-  const summary = formatRunSummary(run);
+  const successCount = records.filter((r) => r.status === "success").length;
+  const failCount = records.length - successCount;
+  let variant;
+  let title;
+  let message;
+  if (records.length === 1) {
+    const r = records[0];
+    const ok = r.status === "success";
+    const slug = r.slug ?? "job";
+    const dur = ((r.durationMs ?? 0) / 1000).toFixed(1);
+    variant = ok ? "success" : "error";
+    title = `${ok ? "[OK]" : "[FAIL]"} ${slug} finished`;
+    message = ok ? `Exit 0 in ${dur}s` : `Failed: ${r.error ?? `exit ${r.exitCode ?? "?"}`}`;
+  } else {
+    variant = failCount === 0 ? "success" : failCount === records.length ? "error" : "warning";
+    title = `${records.length} jobs completed`;
+    message = `${successCount} ok, ${failCount} failed`;
+  }
+  try {
+    await pluginClient.tui.showToast({
+      title,
+      message,
+      variant,
+      duration: 5000
+    });
+  } catch {}
+}
+async function injectBatchIntoPrompt(records) {
+  if (!pluginClient || records.length === 0)
+    return;
+  const summary = formatBatchSummary(records);
   try {
     await pluginClient.tui.appendPrompt({ text: summary });
   } catch {}
@@ -14192,6 +14286,9 @@ async function notifyCompletedRuns() {
     return;
   if (!existsSync(SCOPES_DIR))
     return;
+  const cutoff = lastNotifiedAt;
+  const fresh = [];
+  let maxFinishedAt = null;
   let scopes;
   try {
     scopes = readdirSync(SCOPES_DIR);
@@ -14216,23 +14313,32 @@ async function notifyCompletedRuns() {
       } catch {
         continue;
       }
-      const lines = content.split(`
-`).filter(Boolean);
-      if (!lines.length)
-        continue;
-      let record2;
-      try {
-        record2 = JSON.parse(lines[lines.length - 1]);
-      } catch {
-        continue;
+      for (const line of content.split(`
+`).filter(Boolean)) {
+        let record2;
+        try {
+          record2 = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (!record2.finishedAt || !record2.runId)
+          continue;
+        if (cutoff && record2.finishedAt <= cutoff)
+          continue;
+        fresh.push(record2);
+        if (!maxFinishedAt || record2.finishedAt > maxFinishedAt) {
+          maxFinishedAt = record2.finishedAt;
+        }
       }
-      if (!record2.runId || notifiedRunIds.has(record2.runId))
-        continue;
-      notifiedRunIds.add(record2.runId);
-      await emitCompletionToast(record2);
-      await injectCompletionIntoPrompt(record2);
     }
   }
+  if (fresh.length === 0 || !maxFinishedAt)
+    return;
+  fresh.sort((a, b) => a.finishedAt < b.finishedAt ? -1 : 1);
+  await emitBatchToast(fresh);
+  await injectBatchIntoPrompt(fresh);
+  lastNotifiedAt = maxFinishedAt;
+  saveLastNotified(maxFinishedAt);
 }
 function runJobNow(job) {
   ensureDir(LOGS_DIR);
@@ -14459,6 +14565,13 @@ function getJobLogs(job, options) {
 }
 var SchedulerPlugin = async (input) => {
   pluginClient = input.client;
+  if (lastNotifiedAt === null) {
+    lastNotifiedAt = loadLastNotified();
+    if (lastNotifiedAt === null) {
+      lastNotifiedAt = initializeLastNotified();
+      saveLastNotified(lastNotifiedAt);
+    }
+  }
   return {
     "chat.message": async (msgInput) => {
       lastChatSessionId = msgInput.sessionID;
@@ -15080,4 +15193,4 @@ export {
   slugify
 };
 
-//# debugId=89A018D7FAE282B264756E2164756E21
+//# debugId=4EAAE217049B461064756E2164756E21

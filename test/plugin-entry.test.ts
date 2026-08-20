@@ -93,24 +93,44 @@ describe("Feature C: TUI helpers exist with expected SDK shapes", () => {
     expect(SRC).toMatch(/export async function notifyCompletedRuns/)
   })
 
-  test("notifyCompletedRuns walks SCOPES_DIR/<scope>/runs/*.jsonl", () => {
+  test("notifyCompletedRuns walks SCOPES_DIR/<scope>/runs/*.jsonl and parses all lines", () => {
     const body = functionBody(/export async function notifyCompletedRuns\([^)]*\)\s*:\s*Promise<void>\s*\{/)
     expect(body).toMatch(/SCOPES_DIR/)
     expect(body).toMatch(/\.jsonl/)
     expect(body).toMatch(/readdirSync\(scopeRunsDir\)/)
-    expect(body).toMatch(/JSON\.parse\(lines\[lines\.length - 1\]\)/)
+    expect(body).toMatch(/for\s*\(\s*const\s+line\s+of\s+content\.split/)
   })
 
-  test("notifyCompletedRuns dedupes via notifiedRunIds Set", () => {
+  test("notifyCompletedRuns filters by finishedAt > lastNotifiedAt cutoff", () => {
     const body = functionBody(/export async function notifyCompletedRuns\([^)]*\)\s*:\s*Promise<void>\s*\{/)
-    expect(body).toMatch(/notifiedRunIds\.has\(/)
-    expect(body).toMatch(/notifiedRunIds\.add\(/)
+    expect(body).toMatch(/cutoff/)
+    expect(body).toMatch(/record\.finishedAt\s*<=\s*cutoff/)
+    expect(body).toMatch(/continue/)
   })
 
-  test("notifyCompletedRuns emits a toast AND injects prompt text per new run", () => {
+  test("notifyCompletedRuns tracks maxFinishedAt across all new records", () => {
     const body = functionBody(/export async function notifyCompletedRuns\([^)]*\)\s*:\s*Promise<void>\s*\{/)
-    expect(body).toMatch(/await\s+emitCompletionToast\(/)
-    expect(body).toMatch(/await\s+injectCompletionIntoPrompt\(/)
+    expect(body).toMatch(/maxFinishedAt/)
+    expect(body).toMatch(/record\.finishedAt\s*>\s*maxFinishedAt/)
+  })
+
+  test("notifyCompletedRuns emits ONE batch toast + ONE batch prompt append (not per-run)", () => {
+    const body = functionBody(/export async function notifyCompletedRuns\([^)]*\)\s*:\s*Promise<void>\s*\{/)
+    expect(body).toMatch(/await\s+emitBatchToast\(/)
+    expect(body).toMatch(/await\s+injectBatchIntoPrompt\(/)
+    expect(body).not.toMatch(/await\s+emitCompletionToast\(/)
+    expect(body).not.toMatch(/await\s+injectCompletionIntoPrompt\(/)
+  })
+
+  test("notifyCompletedRuns sorts batch by finishedAt ascending before notifying", () => {
+    const body = functionBody(/export async function notifyCompletedRuns\([^)]*\)\s*:\s*Promise<void>\s*\{/)
+    expect(body).toMatch(/fresh\.sort\(/)
+  })
+
+  test("notifyCompletedRuns persists maxFinishedAt via saveLastNotified", () => {
+    const body = functionBody(/export async function notifyCompletedRuns\([^)]*\)\s*:\s*Promise<void>\s*\{/)
+    expect(body).toMatch(/lastNotifiedAt\s*=\s*maxFinishedAt/)
+    expect(body).toMatch(/saveLastNotified\(maxFinishedAt\)/)
   })
 
   test("notifyCompletedRuns guards with pluginClient null-check", () => {
@@ -118,7 +138,7 @@ describe("Feature C: TUI helpers exist with expected SDK shapes", () => {
     expect(body).toMatch(/if\s*\(\s*!pluginClient\s*\)\s*return/)
   })
 
-  test("formatRunSummary includes slug, status, exit, duration, log path", () => {
+  test("formatRunSummary includes slug, status, exit, duration, log path (Channel A)", () => {
     const body = functionBody(/function formatRunSummary\([^)]*\)\s*:\s*string\s*\{/)
     expect(body).toMatch(/slug/)
     expect(body).toMatch(/status/)
@@ -126,6 +146,80 @@ describe("Feature C: TUI helpers exist with expected SDK shapes", () => {
     expect(body).toMatch(/durationSec/)
     expect(body).toMatch(/logPath/)
     expect(body).toMatch(/return\s+`/)
+  })
+})
+
+describe("Wave 6: persistence helpers (last-notified-at.txt)", () => {
+  test("LAST_NOTIFIED_PATH is under SCHEDULER_DIR", () => {
+    expect(SRC).toMatch(/LAST_NOTIFIED_PATH\s*=\s*join\(SCHEDULER_DIR/)
+  })
+
+  test("loadLastNotified reads file and validates ISO timestamp", () => {
+    const body = functionBody(/function loadLastNotified\(\)\s*:\s*string\s*\|\s*null\s*\{/)
+    expect(body).toMatch(/existsSync\(LAST_NOTIFIED_PATH\)/)
+    expect(body).toMatch(/readFileSync\(LAST_NOTIFIED_PATH/)
+    expect(body).toMatch(/Date\.parse\(raw\)/)
+    expect(body).toMatch(/Number\.isFinite/)
+  })
+
+  test("saveLastNotified writes ISO with newline and 0o600 mode", () => {
+    const body = functionBody(/function saveLastNotified\([^)]*\)\s*:\s*void\s*\{/)
+    expect(body).toMatch(/writeFileSync\(LAST_NOTIFIED_PATH/)
+    expect(body).toMatch(/iso\s*\+\s*["']\\n["']/)
+    expect(body).toMatch(/0o600/)
+  })
+
+  test("initializeLastNotified seeds to latest finishedAt across all runs/*.jsonl", () => {
+    const body = functionBody(/function initializeLastNotified\(\)\s*:\s*string\s*\{/)
+    expect(body).toMatch(/readdirSync\(SCOPES_DIR\)/)
+    expect(body).toMatch(/scopeRunsDir/)
+    expect(body).toMatch(/\.jsonl/)
+    expect(body).toMatch(/r\.finishedAt/)
+    expect(body).toMatch(/latest\s*\|\|\s*r\.finishedAt\s*>\s*latest/)
+    expect(body).toMatch(/new Date\(\)\.toISOString\(\)/)
+  })
+})
+
+describe("Wave 6: batch helpers", () => {
+  test("formatBatchSummary includes header + per-run lines + inspect hint", () => {
+    const body = functionBody(/function formatBatchSummary\([^)]*\)\s*:\s*string\s*\{/)
+    expect(body).toMatch(/completed since last check/)
+    expect(body).toMatch(/Use list_jobs \/ get_job \/ get_logs/)
+    expect(body).toMatch(/\[OK\]/)
+    expect(body).toMatch(/\[FAIL\]/)
+    expect(body).toMatch(/r\.slug/)
+    expect(body).toMatch(/r\.durationMs/)
+  })
+
+  test("emitBatchToast picks variant based on success/fail counts", () => {
+    const body = functionBody(/async function emitBatchToast\([^)]*\)\s*:\s*Promise<void>\s*\{/)
+    expect(body).toMatch(/successCount/)
+    expect(body).toMatch(/failCount/)
+    expect(body).toMatch(/failCount\s*===\s*0/)
+    expect(body).toMatch(/failCount\s*===\s*records\.length/)
+    expect(body).toMatch(/variant\s*=\s*failCount/)
+  })
+
+  test("emitBatchToast for single record delegates to single-run format", () => {
+    const body = functionBody(/async function emitBatchToast\([^)]*\)\s*:\s*Promise<void>\s*\{/)
+    expect(body).toMatch(/records\.length\s*===\s*1/)
+    expect(body).toMatch(/records\[0\]/)
+  })
+
+  test("injectBatchIntoPrompt calls appendPrompt with formatBatchSummary output", () => {
+    const body = functionBody(/async function injectBatchIntoPrompt\([^)]*\)\s*:\s*Promise<void>\s*\{/)
+    expect(body).toMatch(/formatBatchSummary\(/)
+    expect(body).toMatch(/pluginClient(\??)\.tui\.appendPrompt/)
+  })
+})
+
+describe("Wave 6: SchedulerPlugin cold-start seeding", () => {
+  test("SchedulerPlugin loads lastNotifiedAt on init (load or initialize + save)", () => {
+    const body = pluginBody()
+    expect(body).toMatch(/lastNotifiedAt\s*===\s*null/)
+    expect(body).toMatch(/loadLastNotified\(\)/)
+    expect(body).toMatch(/initializeLastNotified\(\)/)
+    expect(body).toMatch(/saveLastNotified\(lastNotifiedAt\)/)
   })
 })
 

@@ -27,6 +27,7 @@ const SCHEDULER_DIR = join(OPENCODE_CONFIG, "scheduler")
 const SCOPES_DIR = join(SCHEDULER_DIR, "scopes")
 const SUPERVISOR_PATH = join(SCHEDULER_DIR, "supervisor.pl")
 const SCHEDULER_CONFIG = join(OPENCODE_CONFIG, "opencode-scheduler.json")
+const LAST_NOTIFIED_PATH = join(SCHEDULER_DIR, "last-notified-at.txt")
 
 // Platform detection
 const IS_MAC = platform() === "darwin"
@@ -2330,7 +2331,67 @@ type PluginClient = {
 
 let pluginClient: PluginClient | null = null
 let lastChatSessionId: string | null = null
-const notifiedRunIds = new Set<string>()
+let lastNotifiedAt: string | null = null
+
+function loadLastNotified(): string | null {
+  try {
+    if (!existsSync(LAST_NOTIFIED_PATH)) return null
+    const raw = readFileSync(LAST_NOTIFIED_PATH, "utf-8").trim()
+    if (!raw) return null
+    const t = Date.parse(raw)
+    return Number.isFinite(t) ? raw : null
+  } catch {
+    return null
+  }
+}
+
+function saveLastNotified(iso: string): void {
+  try {
+    ensureDir(SCHEDULER_DIR)
+    writeFileSync(LAST_NOTIFIED_PATH, iso + "\n", { mode: 0o600 })
+  } catch {
+    // best-effort; if persist fails, next load re-notifies
+  }
+}
+
+function initializeLastNotified(): string {
+  let latest: string | null = null
+  try {
+    if (existsSync(SCOPES_DIR)) {
+      for (const scopeId of readdirSync(SCOPES_DIR)) {
+        const scopeRunsDir = join(SCOPES_DIR, scopeId, "runs")
+        let files: string[]
+        try {
+          files = readdirSync(scopeRunsDir)
+        } catch {
+          continue
+        }
+        for (const file of files) {
+          if (!file.endsWith(".jsonl")) continue
+          let content: string
+          try {
+            content = readFileSync(join(scopeRunsDir, file), "utf-8")
+          } catch {
+            continue
+          }
+          for (const line of content.split("\n").filter(Boolean)) {
+            try {
+              const r = JSON.parse(line) as RunRecord
+              if (r.finishedAt && (!latest || r.finishedAt > latest)) {
+                latest = r.finishedAt
+              }
+            } catch {
+              // skip malformed line
+            }
+          }
+        }
+      }
+    }
+  } catch {
+    // ignore — fall through to now()
+  }
+  return latest ?? new Date().toISOString()
+}
 
 function formatRunSummary(run: RunRecord): string {
   const slug = run.slug ?? "?"
@@ -2340,6 +2401,23 @@ function formatRunSummary(run: RunRecord): string {
   const err = run.error ? ` (${run.error})` : ""
   const logPath = run.logPath ?? "n/a"
   return `[scheduler-ext] '${slug}' finished: status=${status} exit=${exit} duration=${durationSec}s${err}\nLog: ${logPath}`
+}
+
+function formatBatchSummary(records: RunRecord[]): string {
+  const lines: string[] = []
+  const noun = records.length === 1 ? "job" : "jobs"
+  lines.push(`[scheduler-ext] ${records.length} ${noun} completed since last check:`)
+  for (const r of records) {
+    const ok = r.status === "success"
+    const slug = r.slug ?? "?"
+    const dur = ((r.durationMs ?? 0) / 1000).toFixed(1)
+    const exit = r.exitCode ?? "?"
+    const err = r.error ? ` (${r.error})` : ""
+    lines.push(`  ${ok ? "[OK]" : "[FAIL]"} ${slug} — ${dur}s, exit ${exit}${err}`)
+  }
+  lines.push("")
+  lines.push("Use list_jobs / get_job / get_logs to inspect.")
+  return lines.join("\n")
 }
 
 async function emitCompletionToast(run: RunRecord): Promise<void> {
@@ -2360,6 +2438,38 @@ async function emitCompletionToast(run: RunRecord): Promise<void> {
   }
 }
 
+async function emitBatchToast(records: RunRecord[]): Promise<void> {
+  if (!pluginClient || records.length === 0) return
+  const successCount = records.filter((r) => r.status === "success").length
+  const failCount = records.length - successCount
+  let variant: "info" | "success" | "warning" | "error"
+  let title: string
+  let message: string
+  if (records.length === 1) {
+    const r = records[0]
+    const ok = r.status === "success"
+    const slug = r.slug ?? "job"
+    const dur = ((r.durationMs ?? 0) / 1000).toFixed(1)
+    variant = ok ? "success" : "error"
+    title = `${ok ? "[OK]" : "[FAIL]"} ${slug} finished`
+    message = ok ? `Exit 0 in ${dur}s` : `Failed: ${r.error ?? `exit ${r.exitCode ?? "?"}`}`
+  } else {
+    variant = failCount === 0 ? "success" : failCount === records.length ? "error" : "warning"
+    title = `${records.length} jobs completed`
+    message = `${successCount} ok, ${failCount} failed`
+  }
+  try {
+    await pluginClient.tui.showToast({
+      title,
+      message,
+      variant,
+      duration: 5000,
+    })
+  } catch {
+    // TUI may be closed; silent
+  }
+}
+
 async function injectCompletionIntoPrompt(run: RunRecord): Promise<void> {
   if (!pluginClient) return
   const summary = formatRunSummary(run)
@@ -2370,15 +2480,31 @@ async function injectCompletionIntoPrompt(run: RunRecord): Promise<void> {
   }
 }
 
+async function injectBatchIntoPrompt(records: RunRecord[]): Promise<void> {
+  if (!pluginClient || records.length === 0) return
+  const summary = formatBatchSummary(records)
+  try {
+    await pluginClient.tui.appendPrompt({ text: summary })
+  } catch {
+    // TUI may not have a prompt input; silent
+  }
+}
+
 export async function notifyCompletedRuns(): Promise<void> {
   if (!pluginClient) return
   if (!existsSync(SCOPES_DIR)) return
+
+  const cutoff = lastNotifiedAt
+  const fresh: RunRecord[] = []
+  let maxFinishedAt: string | null = null
+
   let scopes: string[]
   try {
     scopes = readdirSync(SCOPES_DIR)
   } catch {
     return
   }
+
   for (const scopeId of scopes) {
     const scopeRunsDir = join(SCOPES_DIR, scopeId, "runs")
     let files: string[]
@@ -2396,20 +2522,32 @@ export async function notifyCompletedRuns(): Promise<void> {
       } catch {
         continue
       }
-      const lines = content.split("\n").filter(Boolean)
-      if (!lines.length) continue
-      let record: RunRecord
-      try {
-        record = JSON.parse(lines[lines.length - 1]) as RunRecord
-      } catch {
-        continue
+      for (const line of content.split("\n").filter(Boolean)) {
+        let record: RunRecord
+        try {
+          record = JSON.parse(line) as RunRecord
+        } catch {
+          continue
+        }
+        if (!record.finishedAt || !record.runId) continue
+        if (cutoff && record.finishedAt <= cutoff) continue
+        fresh.push(record)
+        if (!maxFinishedAt || record.finishedAt > maxFinishedAt) {
+          maxFinishedAt = record.finishedAt
+        }
       }
-      if (!record.runId || notifiedRunIds.has(record.runId)) continue
-      notifiedRunIds.add(record.runId)
-      await emitCompletionToast(record)
-      await injectCompletionIntoPrompt(record)
     }
   }
+
+  if (fresh.length === 0 || !maxFinishedAt) return
+
+  fresh.sort((a, b) => (a.finishedAt! < b.finishedAt! ? -1 : 1))
+
+  await emitBatchToast(fresh)
+  await injectBatchIntoPrompt(fresh)
+
+  lastNotifiedAt = maxFinishedAt
+  saveLastNotified(maxFinishedAt)
 }
 
 function runJobNow(job: Job): { startedAt: string; logPath: string; pid?: number; job: Job | null } {
@@ -2665,6 +2803,13 @@ function getJobLogs(job: Job, options?: { tailLines?: number; maxChars?: number 
 
 export const SchedulerPlugin: Plugin = async (input) => {
   pluginClient = input.client as PluginClient
+  if (lastNotifiedAt === null) {
+    lastNotifiedAt = loadLastNotified()
+    if (lastNotifiedAt === null) {
+      lastNotifiedAt = initializeLastNotified()
+      saveLastNotified(lastNotifiedAt)
+    }
+  }
   return {
     "chat.message": async (msgInput) => {
       lastChatSessionId = msgInput.sessionID
