@@ -22,14 +22,28 @@
   so `systemctl --user enable` no longer leaks `Created symlink ...` into
   the opencode TUI as a synthetic prompt. 4 regression tests in
   `test/install-systemd.test.ts`.
-- **TUI notifications on run completion** (Feature C): `run_job` (foreground)
-  shows a toast when the run finishes; the cron fallback supervisor emits
-  the same toast via `curl POST /tui/show-toast` so background runs also
-  notify; a `chat.message` hook auto-injects the run summary into the
-  most recent chat session via `client.session.prompt({ noReply: true })`.
+- **TUI notifications on run completion** (Feature C, v1.4.1-ext.2+):
+  foreground `run_job` shows a single toast on completion; background
+  cron/OS-scheduler runs are surfaced via the `chat.message` hook as
+  ONE consolidated toast + ONE prompt-input summary per batch of new
+  runs since last check. Cutoff timestamp persisted at
+  `~/.config/opencode/scheduler/last-notified-at.txt` (mode 0o600) so
+  TUI restarts do not flood the user with historical completions.
+  Cold-start seeding initializes the cutoff to `MAX(finishedAt)` across
+  existing runs to avoid history floods on first install.
 - **Source maps** in the published `dist/` (`--sourcemap=external`).
 - **CI** (`.github/workflows/ci.yml`) running `bun install` + `bun test`
   + `bun run build` on every push.
+
+## State files
+
+This fork writes the following files under `~/.config/opencode/scheduler/`:
+
+- `supervisor.pl` — Perl supervisor used by the cron fallback backend.
+- `last-notified-at.txt` — Feature C cutoff timestamp (ISO 8601, mode 0o600).
+  Delete to reset notification history (the next `chat.message` hook
+  will re-notify all runs finished strictly after `MAX(finishedAt)` in
+  the existing `runs/*.jsonl`).
 
 ## Install
 

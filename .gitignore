@@ -2,3 +2,9 @@ node_modules/
 *.log
 .DS_Store
 bun.lock
+# bun runtime artifacts created when running scripts in this dir
+.config/
+.local/
+# source maps are published with the npm tarball via `files: ["dist"]`
+# but not tracked in git (upstream convention; dist/*.map adds ~1MB per build)
+dist/*.map
