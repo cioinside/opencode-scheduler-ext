@@ -2497,8 +2497,11 @@ async function emitBatchToast(records: RunRecord[]): Promise<void> {
       variant,
       duration: 5000,
     })
-  } catch {
-    // TUI may be closed; silent
+  } catch (err) {
+    console.error(
+      "[scheduler-ext] emitBatchToast.showToast failed:",
+      err instanceof Error ? err.message : String(err),
+    )
   }
 }
 
@@ -2507,18 +2510,29 @@ async function injectCompletionIntoPrompt(run: RunRecord): Promise<void> {
   const summary = formatRunSummary(run)
   try {
     await pluginClient.tui.appendPrompt({ text: summary })
-  } catch {
-    // TUI may not have a prompt input (closed, in non-chat view)
+  } catch (err) {
+    console.error(
+      "[scheduler-ext] injectCompletionIntoPrompt.appendPrompt failed:",
+      err instanceof Error ? err.message : String(err),
+    )
   }
 }
 
 async function injectBatchIntoPrompt(records: RunRecord[]): Promise<void> {
   if (!pluginClient || records.length === 0) return
   const summary = formatBatchSummary(records)
+  console.error(
+    "[scheduler-ext] injectBatchIntoPrompt:",
+    records.length,
+    "records -> current TUI",
+  )
   try {
     await pluginClient.tui.appendPrompt({ text: summary })
-  } catch {
-    // TUI may not have a prompt input; silent
+  } catch (err) {
+    console.error(
+      "[scheduler-ext] injectBatchIntoPrompt.appendPrompt failed:",
+      err instanceof Error ? err.message : String(err),
+    )
   }
 }
 
@@ -2594,13 +2608,22 @@ function groupFreshBySession(
 
 async function injectBatchIntoSession(sessionId: string, records: RunRecord[]): Promise<void> {
   if (!pluginClient || records.length === 0) return
+  const summary = formatBatchSummary(records)
   try {
+    // Do NOT set `noReply: true` — the opencode server cannot decode that combination
+    // on subsequent session.messages loads, returning "Unexpected server error" (Di)
+    // and crashing the TUI. Trade-off: AI now responds in the target session even on
+    // background poll (acceptable — user is not viewing that session at the moment).
     await pluginClient.session.prompt({
       path: { id: sessionId },
-      body: { noReply: true, parts: [{ type: "text", text: formatBatchSummary(records) }] },
+      body: { parts: [{ type: "text", text: summary }] },
     })
-  } catch {
-    // session may be closed/deleted; silent
+  } catch (err) {
+    console.error(
+      "[scheduler-ext] injectBatchIntoSession failed for",
+      sessionId,
+      err instanceof Error ? err.message : String(err),
+    )
   }
 }
 
@@ -2618,7 +2641,13 @@ async function triggerAgentOnSession(sessionId: string): Promise<void> {
         ],
       },
     })
-  } catch {}
+  } catch (err) {
+    console.error(
+      "[scheduler-ext] triggerAgentOnSession failed for",
+      sessionId,
+      err instanceof Error ? err.message : String(err),
+    )
+  }
 }
 
 export async function notifyCompletedRuns(): Promise<void> {
@@ -2653,6 +2682,11 @@ export async function notifyCompletedRuns(): Promise<void> {
 
     lastNotifiedAt = maxFinishedAt
     saveLastNotified(maxFinishedAt)
+  } catch (err) {
+    console.error(
+      "[scheduler-ext] notifyCompletedRuns internal error:",
+      err instanceof Error ? err.stack || err.message : String(err),
+    )
   } finally {
     notifyInFlight = false
   }
@@ -2665,32 +2699,44 @@ async function autoNotifyOnResume(config?: SchedulerConfig): Promise<void> {
   const mode = cfg.autoNotify?.mode ?? "active"
   if (mode === "off") return
 
-  const additionalRoots = cfg.additionalSchedulerDirs ?? []
-  const { fresh, maxFinishedAt } = collectFreshRuns(additionalRoots)
-  if (fresh.length === 0 || !maxFinishedAt) return
+  try {
+    const additionalRoots = cfg.additionalSchedulerDirs ?? []
+    const { fresh, maxFinishedAt } = collectFreshRuns(additionalRoots)
+    if (fresh.length === 0 || !maxFinishedAt) return
 
-  fresh.sort((a, b) => (a.finishedAt! < b.finishedAt! ? -1 : 1))
+    fresh.sort((a, b) => (a.finishedAt! < b.finishedAt! ? -1 : 1))
 
-  await emitBatchToast(fresh)
+    await emitBatchToast(fresh)
 
-  const bySession = groupFreshBySession(fresh, additionalRoots)
+    const bySession = groupFreshBySession(fresh, additionalRoots)
 
-  for (const [sid, records] of bySession) {
-    if (!sid) continue
-    await injectBatchIntoSession(sid, records)
-    if (mode === "active") {
-      await triggerAgentOnSession(sid)
+    for (const [sid, records] of bySession) {
+      if (!sid) continue
+      await injectBatchIntoSession(sid, records)
+      if (mode === "active") {
+        await triggerAgentOnSession(sid)
+      }
     }
-  }
 
-  lastNotifiedAt = maxFinishedAt
-  saveLastNotified(maxFinishedAt)
+    lastNotifiedAt = maxFinishedAt
+    saveLastNotified(maxFinishedAt)
+  } catch (err) {
+    console.error(
+      "[scheduler-ext] autoNotifyOnResume internal error:",
+      err instanceof Error ? err.stack || err.message : String(err),
+    )
+  }
 }
 
 function startBackgroundPoll(intervalSec: number): void {
   if (pollTimer || intervalSec <= 0) return
   pollTimer = setInterval(() => {
-    void notifyCompletedRuns()
+    void notifyCompletedRuns().catch((err) => {
+      console.error(
+        "[scheduler-ext] background poll tick rejected:",
+        err instanceof Error ? err.stack || err.message : String(err),
+      )
+    })
   }, intervalSec * 1000)
 }
 
@@ -2961,17 +3007,42 @@ export const SchedulerPlugin: Plugin = async (input) => {
     }
   }
   const config = loadSchedulerConfig()
-  void autoNotifyOnResume(config)
+  console.error(
+    "[scheduler-ext] plugin loaded, lastNotifiedAt=",
+    lastNotifiedAt,
+    "pollIntervalSec=",
+    config.autoNotify?.pollIntervalSec ?? 30,
+  )
+  void autoNotifyOnResume(config).catch((err) => {
+    console.error(
+      "[scheduler-ext] autoNotifyOnResume rejected at plugin entry:",
+      err instanceof Error ? err.stack || err.message : String(err),
+    )
+  })
   startBackgroundPoll(config.autoNotify?.pollIntervalSec ?? 30)
   return {
     "chat.message": async (msgInput) => {
       lastChatSessionId = msgInput.sessionID
-      await notifyCompletedRuns()
+      try {
+        await notifyCompletedRuns()
+      } catch (err) {
+        console.error(
+          "[scheduler-ext] chat.message handler error:",
+          err instanceof Error ? err.stack || err.message : String(err),
+        )
+      }
     },
     "tool.execute.before": async (input) => {
-      const sid = (input as { sessionID?: string })?.sessionID
-      if (sid) {
-        lastToolSessionId = sid
+      try {
+        const sid = (input as { sessionID?: string })?.sessionID
+        if (sid) {
+          lastToolSessionId = sid
+        }
+      } catch (err) {
+        console.error(
+          "[scheduler-ext] tool.execute.before handler error:",
+          err instanceof Error ? err.message : String(err),
+        )
       }
     },
     tool: {

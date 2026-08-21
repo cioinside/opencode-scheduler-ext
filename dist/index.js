@@ -14292,15 +14292,20 @@ async function emitBatchToast(records) {
       variant,
       duration: 5000
     });
-  } catch {}
+  } catch (err) {
+    console.error("[scheduler-ext] emitBatchToast.showToast failed:", err instanceof Error ? err.message : String(err));
+  }
 }
 async function injectBatchIntoPrompt(records) {
   if (!pluginClient || records.length === 0)
     return;
   const summary = formatBatchSummary(records);
+  console.error("[scheduler-ext] injectBatchIntoPrompt:", records.length, "records -> current TUI");
   try {
     await pluginClient.tui.appendPrompt({ text: summary });
-  } catch {}
+  } catch (err) {
+    console.error("[scheduler-ext] injectBatchIntoPrompt.appendPrompt failed:", err instanceof Error ? err.message : String(err));
+  }
 }
 function collectFreshRuns(additionalRoots = []) {
   const cutoff = lastNotifiedAt;
@@ -14369,12 +14374,15 @@ function groupFreshBySession(records, additionalRoots = []) {
 async function injectBatchIntoSession(sessionId, records) {
   if (!pluginClient || records.length === 0)
     return;
+  const summary = formatBatchSummary(records);
   try {
     await pluginClient.session.prompt({
       path: { id: sessionId },
-      body: { noReply: true, parts: [{ type: "text", text: formatBatchSummary(records) }] }
+      body: { parts: [{ type: "text", text: summary }] }
     });
-  } catch {}
+  } catch (err) {
+    console.error("[scheduler-ext] injectBatchIntoSession failed for", sessionId, err instanceof Error ? err.message : String(err));
+  }
 }
 async function triggerAgentOnSession(sessionId) {
   if (!pluginClient)
@@ -14391,7 +14399,9 @@ async function triggerAgentOnSession(sessionId) {
         ]
       }
     });
-  } catch {}
+  } catch (err) {
+    console.error("[scheduler-ext] triggerAgentOnSession failed for", sessionId, err instanceof Error ? err.message : String(err));
+  }
 }
 async function notifyCompletedRuns() {
   if (notifyInFlight)
@@ -14421,6 +14431,8 @@ async function notifyCompletedRuns() {
     }
     lastNotifiedAt = maxFinishedAt;
     saveLastNotified(maxFinishedAt);
+  } catch (err) {
+    console.error("[scheduler-ext] notifyCompletedRuns internal error:", err instanceof Error ? err.stack || err.message : String(err));
   } finally {
     notifyInFlight = false;
   }
@@ -14432,29 +14444,35 @@ async function autoNotifyOnResume(config2) {
   const mode = cfg.autoNotify?.mode ?? "active";
   if (mode === "off")
     return;
-  const additionalRoots = cfg.additionalSchedulerDirs ?? [];
-  const { fresh, maxFinishedAt } = collectFreshRuns(additionalRoots);
-  if (fresh.length === 0 || !maxFinishedAt)
-    return;
-  fresh.sort((a, b) => a.finishedAt < b.finishedAt ? -1 : 1);
-  await emitBatchToast(fresh);
-  const bySession = groupFreshBySession(fresh, additionalRoots);
-  for (const [sid, records] of bySession) {
-    if (!sid)
-      continue;
-    await injectBatchIntoSession(sid, records);
-    if (mode === "active") {
-      await triggerAgentOnSession(sid);
+  try {
+    const additionalRoots = cfg.additionalSchedulerDirs ?? [];
+    const { fresh, maxFinishedAt } = collectFreshRuns(additionalRoots);
+    if (fresh.length === 0 || !maxFinishedAt)
+      return;
+    fresh.sort((a, b) => a.finishedAt < b.finishedAt ? -1 : 1);
+    await emitBatchToast(fresh);
+    const bySession = groupFreshBySession(fresh, additionalRoots);
+    for (const [sid, records] of bySession) {
+      if (!sid)
+        continue;
+      await injectBatchIntoSession(sid, records);
+      if (mode === "active") {
+        await triggerAgentOnSession(sid);
+      }
     }
+    lastNotifiedAt = maxFinishedAt;
+    saveLastNotified(maxFinishedAt);
+  } catch (err) {
+    console.error("[scheduler-ext] autoNotifyOnResume internal error:", err instanceof Error ? err.stack || err.message : String(err));
   }
-  lastNotifiedAt = maxFinishedAt;
-  saveLastNotified(maxFinishedAt);
 }
 function startBackgroundPoll(intervalSec) {
   if (pollTimer || intervalSec <= 0)
     return;
   pollTimer = setInterval(() => {
-    notifyCompletedRuns();
+    notifyCompletedRuns().catch((err) => {
+      console.error("[scheduler-ext] background poll tick rejected:", err instanceof Error ? err.stack || err.message : String(err));
+    });
   }, intervalSec * 1000);
 }
 function runJobNow(job) {
@@ -14690,17 +14708,28 @@ var SchedulerPlugin = async (input) => {
     }
   }
   const config2 = loadSchedulerConfig();
-  autoNotifyOnResume(config2);
+  console.error("[scheduler-ext] plugin loaded, lastNotifiedAt=", lastNotifiedAt, "pollIntervalSec=", config2.autoNotify?.pollIntervalSec ?? 30);
+  autoNotifyOnResume(config2).catch((err) => {
+    console.error("[scheduler-ext] autoNotifyOnResume rejected at plugin entry:", err instanceof Error ? err.stack || err.message : String(err));
+  });
   startBackgroundPoll(config2.autoNotify?.pollIntervalSec ?? 30);
   return {
     "chat.message": async (msgInput) => {
       lastChatSessionId = msgInput.sessionID;
-      await notifyCompletedRuns();
+      try {
+        await notifyCompletedRuns();
+      } catch (err) {
+        console.error("[scheduler-ext] chat.message handler error:", err instanceof Error ? err.stack || err.message : String(err));
+      }
     },
     "tool.execute.before": async (input2) => {
-      const sid = input2?.sessionID;
-      if (sid) {
-        lastToolSessionId = sid;
+      try {
+        const sid = input2?.sessionID;
+        if (sid) {
+          lastToolSessionId = sid;
+        }
+      } catch (err) {
+        console.error("[scheduler-ext] tool.execute.before handler error:", err instanceof Error ? err.message : String(err));
       }
     },
     tool: {
@@ -15321,4 +15350,4 @@ export {
   slugify
 };
 
-//# debugId=D410D84A16B0AC3764756E2164756E21
+//# debugId=7ED671FC57BE7BAA64756E2164756E21

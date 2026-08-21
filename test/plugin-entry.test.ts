@@ -313,12 +313,13 @@ describe("Wave 7: collectFreshRuns + groupFreshBySession helpers", () => {
 })
 
 describe("Wave 7: per-session routing helpers", () => {
-  test("injectBatchIntoSession uses session.prompt with noReply:true and formatBatchSummary", () => {
+  test("injectBatchIntoSession uses session.prompt with parts + formatBatchSummary + catch (no noReply:true)", () => {
     const body = functionBody(/async function injectBatchIntoSession\([^)]*\)\s*:\s*Promise<void>\s*\{/)
     expect(body).toMatch(/pluginClient(\??)\.session\.prompt/)
-    expect(body).toMatch(/noReply:\s*true/)
     expect(body).toMatch(/formatBatchSummary\(/)
-    expect(body).toMatch(/try\s*\{[\s\S]*?\}\s*catch\s*\{/)
+    expect(body).toMatch(/body:\s*\{\s*parts:/)
+    expect(body).not.toMatch(/body:\s*\{\s*noReply:\s*true/)
+    expect(body).toMatch(/try\s*\{[\s\S]*?\}\s*catch\s*\(\s*err\s*\)/)
   })
 
   test("triggerAgentOnSession uses session.prompt WITHOUT noReply (triggers model)", () => {
@@ -489,5 +490,97 @@ describe("Wave 8.2: cross-home multi-root scheduler dirs", () => {
     expect(body).toMatch(/additionalRoots\s*=\s*cfg\.additionalSchedulerDirs\s*\?\?\s*\[\]/)
     expect(body).toMatch(/collectFreshRuns\s*\(\s*additionalRoots\s*\)/)
     expect(body).toMatch(/groupFreshBySession\s*\(\s*fresh\s*,\s*additionalRoots\s*\)/)
+  })
+})
+
+describe("Wave 8.3: bulletproof error handling — no unhandled promise rejection", () => {
+  test("injectBatchIntoSession no longer sets noReply: true (caused TUI crash via undecodable stored messages)", () => {
+    const body = functionBody(/async function injectBatchIntoSession\([^)]*\)\s*:\s*Promise<void>\s*\{/)
+    expect(body).not.toMatch(/body:\s*\{\s*noReply:\s*true/)
+    expect(body).toMatch(/body:\s*\{\s*parts:\s*\[\s*\{\s*type:\s*["']text["']/)
+  })
+
+  test("injectBatchIntoSession logs error on session.prompt failure", () => {
+    const body = functionBody(/async function injectBatchIntoSession\([^)]*\)\s*:\s*Promise<void>\s*\{/)
+    expect(body).toMatch(/catch\s*\(\s*err\s*\)/)
+    expect(body).toMatch(/console\.error\([^)]*injectBatchIntoSession failed/)
+  })
+
+  test("triggerAgentOnSession logs error on session.prompt failure", () => {
+    const body = functionBody(/async function triggerAgentOnSession\([^)]*\)\s*:\s*Promise<void>\s*\{/)
+    expect(body).toMatch(/catch\s*\(\s*err\s*\)/)
+    expect(body).toMatch(/console\.error\([^)]*triggerAgentOnSession failed/)
+  })
+
+  test("notifyCompletedRuns body now has catch clause (was try/finally only)", () => {
+    const body = functionBody(/export async function notifyCompletedRuns\([^)]*\)\s*:\s*Promise<void>\s*\{/)
+    expect(body).toMatch(/try\s*\{/)
+    expect(body).toMatch(/\}\s*catch\s*\(\s*err\s*\)/)
+    expect(body).toMatch(/console\.error\([^)]*notifyCompletedRuns internal error/)
+    expect(body).toMatch(/finally\s*\{[\s\S]*?notifyInFlight\s*=\s*false[\s\S]*?\}/)
+  })
+
+  test("autoNotifyOnResume body now has try/catch around the work block", () => {
+    const body = functionBody(/async function autoNotifyOnResume\([^)]*\)\s*:\s*Promise<void>\s*\{/)
+    expect(body).toMatch(/try\s*\{/)
+    expect(body).toMatch(/\}\s*catch\s*\(\s*err\s*\)/)
+    expect(body).toMatch(/console\.error\([^)]*autoNotifyOnResume internal error/)
+  })
+
+  test("chat.message handler is wrapped in try/catch so unhandled rejections cannot crash TUI", () => {
+    const body = pluginBody()
+    const hook = body.match(
+      /["']chat\.message["']\s*:\s*async\s*\([^)]*\)\s*=>\s*\{([\s\S]*?)\n\s{4}\}/,
+    )
+    expect(hook).toBeTruthy()
+    const inner = hook![1]
+    expect(inner).toMatch(/try\s*\{/)
+    expect(inner).toMatch(/await\s+notifyCompletedRuns\(\)/)
+    expect(inner).toMatch(/\}\s*catch\s*\(\s*err\s*\)/)
+    expect(inner).toMatch(/console\.error\([^)]*chat\.message handler error/)
+  })
+
+  test("tool.execute.before handler is wrapped in try/catch", () => {
+    const body = pluginBody()
+    const hook = body.match(
+      /["']tool\.execute\.before["']\s*:\s*async\s*\([^)]*\)\s*=>\s*\{([\s\S]*?)\n\s{4}\}/,
+    )
+    expect(hook).toBeTruthy()
+    const inner = hook![1]
+    expect(inner).toMatch(/try\s*\{/)
+    expect(inner).toMatch(/\}\s*catch\s*\(\s*err\s*\)/)
+    expect(inner).toMatch(/console\.error\([^)]*tool\.execute\.before handler error/)
+  })
+
+  test("startBackgroundPoll setInterval callback has .catch() on the void notifyCompletedRuns() promise", () => {
+    const body = functionBody(/function startBackgroundPoll\([^)]*\)\s*:\s*void\s*\{/)
+    expect(body).toMatch(/setInterval\s*\(/)
+    expect(body).toMatch(/void\s+notifyCompletedRuns\(\)\s*\.\s*catch\s*\(/)
+    expect(body).toMatch(/console\.error\([^)]*background poll tick rejected/)
+  })
+
+  test("plugin entry fires void autoNotifyOnResume(config) with .catch() handler", () => {
+    const body = pluginBody()
+    expect(body).toMatch(
+      /void\s+autoNotifyOnResume\s*\(\s*config\s*\)\s*\.\s*catch\s*\(/,
+    )
+    expect(body).toMatch(/console\.error\([^)]*autoNotifyOnResume rejected at plugin entry/)
+  })
+
+  test("emitBatchToast logs error on showToast failure (was silent)", () => {
+    const body = functionBody(/async function emitBatchToast\([^)]*\)\s*:\s*Promise<void>\s*\{/)
+    expect(body).toMatch(/catch\s*\(\s*err\s*\)/)
+    expect(body).toMatch(/console\.error\([^)]*emitBatchToast\.showToast failed/)
+  })
+
+  test("injectBatchIntoPrompt logs diagnostic info on entry and on appendPrompt failure", () => {
+    const body = functionBody(/async function injectBatchIntoPrompt\([^)]*\)\s*:\s*Promise<void>\s*\{/)
+    expect(body).toContain("[scheduler-ext] injectBatchIntoPrompt:")
+    expect(body).toContain("[scheduler-ext] injectBatchIntoPrompt.appendPrompt failed")
+  })
+
+  test("plugin entry logs diagnostic info on load (lastNotifiedAt + pollIntervalSec)", () => {
+    const body = pluginBody()
+    expect(body).toMatch(/console\.error\([^)]*plugin loaded, lastNotifiedAt=/)
   })
 })

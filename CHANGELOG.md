@@ -4,6 +4,63 @@ All notable changes to **opencode-scheduler-ext** are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.6.3-ext.1] — 2026-08-21
+
+### Fixed (TUI crash from "Unexpected server error")
+
+After v1.6.2-ext.1 deployment the user's TUI crashed with
+`Error: Unexpected server error. Check server logs for details.
+at chunk-rcvbhse6.js:8:7615 at processTicksAndRejections (native:7:39)`.
+Root cause was a stored-message decode failure: the opencode server
+returns a `Di("Unexpected server error...")` error from `session.messages`,
+`session.context`, and `session.revert.*` handlers whenever it cannot
+decode a persisted message. The combination `session.prompt({noReply:true,
+parts:[{type:"text",...}]})` produces such a message: `parts` + `noReply:true`
+yields an entry the decoder cannot read back on the next session load.
+Subsequent calls to that session throw the same `Di` error, killing any
+TUI that touches it.
+
+#### Changes
+
+- **`injectBatchIntoSession`**: dropped `noReply:true` from the
+  `session.prompt` body. The message is now persisted with normal
+  `parts:[{type:"text",...}]` shape and decodes cleanly on later loads.
+  Trade-off: the AI now responds in the target session even on background
+  poll. Acceptable because (a) the user explicitly asked for model
+  triggering ("Триггерить модель тоже") and (b) the user is not viewing
+  that session at the moment of background injection.
+- **`triggerAgentOnSession`**: added diagnostic logging on prompt failure
+  (previously swallowed silently with `catch {}`).
+- **`emitBatchToast` / `injectCompletionIntoPrompt` / `injectBatchIntoPrompt`**:
+  replaced silent `catch {}` blocks with `catch (err) { console.error(...) }`
+  so future regressions are visible in the TUI log.
+- **`notifyCompletedRuns`**: body now wrapped in `try { ... } catch (err) {
+  console.error(...) } finally { notifyInFlight = false }` (was
+  `try { ... } finally { ... }` only). Internal failures no longer propagate
+  to the chat.message handler and cannot crash the TUI.
+- **`autoNotifyOnResume`**: body wrapped in `try/catch` with logging.
+- **`SchedulerPlugin` entry**: `chat.message` and `tool.execute.before`
+  handlers wrapped in `try/catch` so any rejection is logged and swallowed
+  instead of becoming an unhandled rejection in the opencode runtime.
+- **`startBackgroundPoll`**: the `setInterval` tick now invokes
+  `void notifyCompletedRuns().catch(err => console.error(...))` instead of
+  a bare `void notifyCompletedRuns()`. Eliminates floating-promise
+  unhandled-rejection cases.
+- **`void autoNotifyOnResume(config)` at entry**: same `.catch()` wrapping.
+- **Plugin load banner**: now logs `[scheduler-ext] plugin loaded,
+  lastNotifiedAt=..., pollIntervalSec=...` once on init for confirmation
+  that the new dist is in use.
+
+#### Tests
+
+12 new tests in `Wave 8.3: bulletproof error handling` covering:
+`noReply:true` removal, try/catch wrapping in `notifyCompletedRuns` /
+`autoNotifyOnResume` / `chat.message` / `tool.execute.before`,
+`.catch()` on `setInterval` tick and on `void autoNotifyOnResume(config)`,
+diagnostic logging presence, plugin entry banner.
+
+All 73 tests pass (was 71).
+
 ## [1.6.2-ext.1] — 2026-08-21
 
 ### Added (cross-home multi-root scheduler)

@@ -1,6 +1,6 @@
 {
   "name": "opencode-scheduler-ext",
-  "version": "1.6.2-ext.1",
+  "version": "1.6.3-ext.1",
   "description": "OpenCode plugin for scheduling recurring jobs using launchd, systemd, Task Scheduler, or cron fallback \u2014 extended fork with security hardening and TUI notifications",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
