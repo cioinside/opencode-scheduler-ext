@@ -13,7 +13,7 @@
  */
 import type { Plugin } from "@opencode-ai/plugin"
 import { tool } from "@opencode-ai/plugin"
-import { createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync, unlinkSync } from "fs"
+import { appendFileSync, createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync, unlinkSync } from "fs"
 import { basename, dirname, join, resolve as resolvePath } from "path"
 import { homedir, platform } from "os"
 import { execFileSync, execSync, spawn, type ChildProcess } from "child_process"
@@ -29,6 +29,8 @@ const SCOPES_DIR = join(SCHEDULER_DIR, "scopes")
 const SUPERVISOR_PATH = join(SCHEDULER_DIR, "supervisor.pl")
 const SCHEDULER_CONFIG = join(OPENCODE_CONFIG, "opencode-scheduler.json")
 const LAST_NOTIFIED_PATH = join(SCHEDULER_DIR, "last-notified-at.txt")
+const NOTIFICATIONS_PATH = join(SCHEDULER_DIR, "notifications.jsonl")
+const NOTIFICATIONS_CURSOR_PATH = join(SCHEDULER_DIR, "notifications.cursor")
 
 // Platform detection
 const IS_MAC = platform() === "darwin"
@@ -331,20 +333,38 @@ $job->{updatedAt} = $finished_at;
 write_json_atomic($job_path, $job);
 
 append_jsonl("$runs_dir/$slug.jsonl", {
-  runId => $run_id,
-  scopeId => $scope_id,
-  slug => $slug,
-  startedAt => $started_at,
-  finishedAt => $finished_at,
-  durationMs => $duration_ms,
-  status => $final_status,
-  exitCode => $exit_code,
-  error => $final_error,
-  pid => $child_pid,
-  logPath => $log_path,
-});
+   runId => $run_id,
+   scopeId => $scope_id,
+   slug => $slug,
+   startedAt => $started_at,
+   finishedAt => $finished_at,
+   durationMs => $duration_ms,
+   status => $final_status,
+   exitCode => $exit_code,
+   error => $final_error,
+   pid => $child_pid,
+   logPath => $log_path,
+ });
 
-unlink $lock_path;
+ # ext.12: append a notification line so the user's TUI plugin (which polls
+ # ~/.config/opencode/scheduler/notifications.jsonl every pollIntervalSec)
+ # can inject the completion via tui.appendPrompt. supervisor.pl is the
+ # deterministic place to do this — the opencode-run child process exits
+ # before its unref'd background poll can fire, so the plugin never sees
+ # the fresh record on the producer side.
+ append_jsonl("$config_root/scheduler/notifications.jsonl", {
+   timestamp => $finished_at,
+   scopeId => $scope_id,
+   slug => $slug,
+   runId => $run_id,
+   status => $final_status,
+   exitCode => $exit_code,
+   finishedAt => $finished_at,
+   durationMs => $duration_ms,
+   logPath => $log_path,
+ });
+
+ unlink $lock_path;
 print "\n=== Finished $finished_at status=$final_status exitCode=$exit_code durationMs=$duration_ms ===\n";
 exit($exit_code);
 `
@@ -2614,17 +2634,106 @@ async function injectCompletionIntoPrompt(run: RunRecord): Promise<void> {
 }
 
 async function injectBatchIntoPrompt(records: RunRecord[]): Promise<void> {
-  if (!pluginClient || records.length === 0) return
+  if (records.length === 0) return
+  appendNotificationsToFile(records)
+}
+
+function appendNotificationsToFile(records: RunRecord[]): void {
+  try {
+    ensureDir(SCHEDULER_DIR)
+    const lines = records
+      .map((r) =>
+        JSON.stringify({
+          timestamp: new Date().toISOString(),
+          scopeId: r.scopeId,
+          slug: r.slug,
+          runId: r.runId,
+          status: r.status,
+          exitCode: r.exitCode,
+          finishedAt: r.finishedAt,
+          durationMs: r.durationMs,
+          logPath: r.logPath,
+        }),
+      )
+      .join("\n") + "\n"
+    appendFileSync(NOTIFICATIONS_PATH, lines)
+  } catch (err) {
+    console.error(
+      "[scheduler-ext] appendNotificationsToFile failed:",
+      err instanceof Error ? err.message : String(err),
+    )
+  }
+}
+
+function loadNotificationsCursor(): number {
+  try {
+    const raw = readFileSync(NOTIFICATIONS_CURSOR_PATH, "utf-8").trim()
+    const n = parseInt(raw, 10)
+    return Number.isFinite(n) && n >= 0 ? n : 0
+  } catch {
+    return 0
+  }
+}
+
+function saveNotificationsCursor(n: number): void {
+  try {
+    ensureDir(SCHEDULER_DIR)
+    writeFileSync(NOTIFICATIONS_CURSOR_PATH, String(n))
+  } catch {
+    // best-effort; TUI re-reads file next tick anyway
+  }
+}
+
+let notificationsCursor: number | null = null
+
+async function pollNotificationsFile(): Promise<void> {
+  if (!pluginClient) return
+  if (notificationsCursor === null) {
+    notificationsCursor = loadNotificationsCursor()
+  }
+  let content: string
+  try {
+    content = readFileSync(NOTIFICATIONS_PATH, "utf-8")
+  } catch {
+    return
+  }
+  const lines = content.split("\n").filter((l) => l.length > 0)
+  if (lines.length <= notificationsCursor) return
+  const newLines = lines.slice(notificationsCursor)
+  notificationsCursor = lines.length
+  saveNotificationsCursor(lines.length)
+  const records: RunRecord[] = []
+  for (const line of newLines) {
+    try {
+      const p = JSON.parse(line)
+      records.push({
+        scopeId: p.scopeId,
+        slug: p.slug,
+        runId: p.runId,
+        status: p.status,
+        exitCode: p.exitCode,
+        finishedAt: p.finishedAt,
+        durationMs: p.durationMs,
+        logPath: p.logPath,
+        startedAt: p.finishedAt,
+        prompt: "",
+        source: "scheduler-ext",
+      } as RunRecord)
+    } catch {
+      continue
+    }
+  }
+  if (records.length === 0) return
   const summary = formatBatchSummary(records)
   try {
     await withTimeout(
       pluginClient.tui.appendPrompt({ text: summary }),
       PLUGIN_CLIENT_TIMEOUT_MS,
-      "injectBatchIntoPrompt.appendPrompt",
+      "pollNotificationsFile.appendPrompt",
     )
   } catch (err) {
     console.error(
-      "[scheduler-ext] injectBatchIntoPrompt.appendPrompt failed:",
+      "[scheduler-ext] pollNotificationsFile.appendPrompt failed:",
       err instanceof Error ? err.message : String(err),
     )
   }
@@ -2868,6 +2977,12 @@ function startBackgroundPoll(intervalSec: number): void {
     void notifyCompletedRuns().catch((err) => {
       console.error(
         "[scheduler-ext] background poll tick rejected:",
+        err instanceof Error ? err.stack || err.message : String(err),
+      )
+    })
+    void pollNotificationsFile().catch((err) => {
+      console.error(
+        "[scheduler-ext] notifications-file poll tick rejected:",
         err instanceof Error ? err.stack || err.message : String(err),
       )
     })

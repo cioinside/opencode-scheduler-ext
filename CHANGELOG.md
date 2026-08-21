@@ -4,6 +4,44 @@ All notable changes to **opencode-scheduler-ext** are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.6.4-ext.12] — 2026-08-21
+
+### Fixed (file-based notifications — cross-server TUI delivery)
+
+The `tui.appendPrompt` call in `injectBatchIntoPrompt` only delivers to the
+opencode-server that the *calling* process is connected to. When a
+scheduled task runs via `opencode run --prompt ...` from cron, that process
+auto-starts its own ephemeral opencode-server on a random port — different
+from the user's TUI server (`127.0.0.1:<dynamic-port>`). Result:
+notifications landed on an orphan server with no TUI listening and the user
+saw nothing.
+
+Fix: drop the direct `tui.appendPrompt` call. Instead, append a one-line
+JSON record per completion to `~/.config/opencode/scheduler/notifications.jsonl`
+(atomic `appendFileSync`). The user's TUI plugin polls that file every
+`autoNotify.pollIntervalSec` (default 30s) and injects new entries via
+`tui.appendPrompt` against its own server. Cursor is persisted in
+`notifications.cursor` so restarts don't re-inject.
+
+```ts
+// Before (ext.11 — wrong server under cron-driven runs):
+pluginClient.tui.appendPrompt({ text: summary })
+
+// After (ext.12 — file-based producer/consumer):
+appendNotificationsToFile(records)              // producer side
+pollNotificationsFile()                        // consumer side (TUI only)
+```
+
+Side effects:
+- Both cron-driven and TUI plugin instances write to the same file
+  (race-safe via appendFileSync).
+- TUI's `pollNotificationsFile` skips its own writes naturally (cursor
+  advances to current line count after each read).
+- CLI one-shots (`opencode mcp list`) write to file harmlessly — nothing
+  reads in that context.
+
+Related: L12 lesson recorded in `experience-records/experience/opencode-scheduler-cross-home-multiroot/note-v11.md` (to be created).
+
 ## [1.6.4-ext.11] — 2026-08-21
 
 ### Fixed (defensive gate for stale job.sessionId under user-mode)

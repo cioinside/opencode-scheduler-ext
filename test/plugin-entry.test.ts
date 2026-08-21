@@ -214,10 +214,9 @@ describe("Wave 6: batch helpers", () => {
     expect(body).toMatch(/records\[0\]/)
   })
 
-  test("injectBatchIntoPrompt calls appendPrompt with formatBatchSummary output", () => {
+  test("injectBatchIntoPrompt delegates to appendNotificationsToFile (ext.12)", () => {
     const body = functionBody(/async function injectBatchIntoPrompt\([^)]*\)\s*:\s*Promise<void>\s*\{/)
-    expect(body).toMatch(/formatBatchSummary\(/)
-    expect(body).toMatch(/pluginClient(\??)\.tui\.appendPrompt/)
+    expect(body).toMatch(/appendNotificationsToFile/)
   })
 })
 
@@ -573,10 +572,10 @@ describe("Wave 8.3: bulletproof error handling — no unhandled promise rejectio
     expect(body).toMatch(/console\.error\([^)]*emitBatchToast\.showToast failed/)
   })
 
-  test("injectBatchIntoPrompt logs error only on appendPrompt failure (no entry debug log — TUI pollution)", () => {
+  test("injectBatchIntoPrompt delegates to appendNotificationsToFile (ext.12 file-based)", () => {
     const body = functionBody(/async function injectBatchIntoPrompt\([^)]*\)\s*:\s*Promise<void>\s*\{/)
     expect(body).not.toContain("[scheduler-ext] injectBatchIntoPrompt:")
-    expect(body).toContain("[scheduler-ext] injectBatchIntoPrompt.appendPrompt failed")
+    expect(body).toContain("appendNotificationsToFile")
   })
 
   test("plugin entry logs diagnostic info on load (lastNotifiedAt + pollIntervalSec)", () => {
