@@ -2341,6 +2341,7 @@ let lastChatSessionId: string | null = null
 let lastToolSessionId: string | null = null
 let lastNotifiedAt: string | null = null
 let pollTimer: ReturnType<typeof setInterval> | null = null
+let notifyInFlight: boolean = false
 
 function loadLastNotified(): string | null {
   try {
@@ -2604,32 +2605,38 @@ async function triggerAgentOnSession(sessionId: string): Promise<void> {
 }
 
 export async function notifyCompletedRuns(): Promise<void> {
+  if (notifyInFlight) return
   if (!pluginClient) return
 
-  const { fresh, maxFinishedAt } = collectFreshRuns()
-  if (fresh.length === 0 || !maxFinishedAt) return
+  notifyInFlight = true
+  try {
+    const { fresh, maxFinishedAt } = collectFreshRuns()
+    if (fresh.length === 0 || !maxFinishedAt) return
 
-  fresh.sort((a, b) => (a.finishedAt! < b.finishedAt! ? -1 : 1))
+    fresh.sort((a, b) => (a.finishedAt! < b.finishedAt! ? -1 : 1))
 
-  await emitBatchToast(fresh)
+    await emitBatchToast(fresh)
 
-  const bySession = groupFreshBySession(fresh)
-  const currentSessionRecords: RunRecord[] = []
+    const bySession = groupFreshBySession(fresh)
+    const currentSessionRecords: RunRecord[] = []
 
-  for (const [sid, records] of bySession) {
-    if (!sid || sid === lastChatSessionId) {
-      currentSessionRecords.push(...records)
-    } else {
-      await injectBatchIntoSession(sid, records)
+    for (const [sid, records] of bySession) {
+      if (!sid || sid === lastChatSessionId) {
+        currentSessionRecords.push(...records)
+      } else {
+        await injectBatchIntoSession(sid, records)
+      }
     }
-  }
 
-  if (currentSessionRecords.length > 0) {
-    await injectBatchIntoPrompt(currentSessionRecords)
-  }
+    if (currentSessionRecords.length > 0) {
+      await injectBatchIntoPrompt(currentSessionRecords)
+    }
 
-  lastNotifiedAt = maxFinishedAt
-  saveLastNotified(maxFinishedAt)
+    lastNotifiedAt = maxFinishedAt
+    saveLastNotified(maxFinishedAt)
+  } finally {
+    notifyInFlight = false
+  }
 }
 
 async function autoNotifyOnResume(config?: SchedulerConfig): Promise<void> {

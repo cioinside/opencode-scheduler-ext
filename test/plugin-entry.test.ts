@@ -425,3 +425,27 @@ describe("Wave 8: background poll triggers notifyCompletedRuns without chat.mess
     expect(body).toMatch(/void\s+autoNotifyOnResume\(config\)/)
   })
 })
+
+describe("Wave 8.1: in-flight flag prevents concurrent notifyCompletedRuns", () => {
+  test("module-level notifyInFlight var is declared alongside pollTimer", () => {
+    expect(SRC).toMatch(/^\s*let notifyInFlight:\s*boolean\s*=\s*false/m)
+  })
+
+  test("notifyCompletedRuns skips if already in-flight (early return)", () => {
+    const body = functionBody(/export async function notifyCompletedRuns\([^)]*\)\s*:\s*Promise<void>\s*\{/)
+    expect(body).toMatch(/if\s*\(\s*notifyInFlight\s*\)\s*return/)
+  })
+
+  test("notifyCompletedRuns body wrapped in try/finally with notifyInFlight flag", () => {
+    const body = functionBody(/export async function notifyCompletedRuns\([^)]*\)\s*:\s*Promise<void>\s*\{/)
+    expect(body).toMatch(/notifyInFlight\s*=\s*true/)
+    expect(body).toMatch(/try\s*\{/)
+    expect(body).toMatch(/finally\s*\{/)
+    expect(body).toMatch(/finally\s*\{[\s\S]*?notifyInFlight\s*=\s*false[\s\S]*?\}/)
+  })
+
+  test("notifyCompletedRuns still guards with pluginClient null-check", () => {
+    const body = functionBody(/export async function notifyCompletedRuns\([^)]*\)\s*:\s*Promise<void>\s*\{/)
+    expect(body).toMatch(/if\s*\(\s*!pluginClient\s*\)\s*return/)
+  })
+})

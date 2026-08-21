@@ -14156,6 +14156,7 @@ var lastChatSessionId = null;
 var lastToolSessionId = null;
 var lastNotifiedAt = null;
 var pollTimer = null;
+var notifyInFlight = false;
 function loadLastNotified() {
   try {
     if (!existsSync(LAST_NOTIFIED_PATH))
@@ -14386,27 +14387,34 @@ async function triggerAgentOnSession(sessionId) {
   } catch {}
 }
 async function notifyCompletedRuns() {
+  if (notifyInFlight)
+    return;
   if (!pluginClient)
     return;
-  const { fresh, maxFinishedAt } = collectFreshRuns();
-  if (fresh.length === 0 || !maxFinishedAt)
-    return;
-  fresh.sort((a, b) => a.finishedAt < b.finishedAt ? -1 : 1);
-  await emitBatchToast(fresh);
-  const bySession = groupFreshBySession(fresh);
-  const currentSessionRecords = [];
-  for (const [sid, records] of bySession) {
-    if (!sid || sid === lastChatSessionId) {
-      currentSessionRecords.push(...records);
-    } else {
-      await injectBatchIntoSession(sid, records);
+  notifyInFlight = true;
+  try {
+    const { fresh, maxFinishedAt } = collectFreshRuns();
+    if (fresh.length === 0 || !maxFinishedAt)
+      return;
+    fresh.sort((a, b) => a.finishedAt < b.finishedAt ? -1 : 1);
+    await emitBatchToast(fresh);
+    const bySession = groupFreshBySession(fresh);
+    const currentSessionRecords = [];
+    for (const [sid, records] of bySession) {
+      if (!sid || sid === lastChatSessionId) {
+        currentSessionRecords.push(...records);
+      } else {
+        await injectBatchIntoSession(sid, records);
+      }
     }
+    if (currentSessionRecords.length > 0) {
+      await injectBatchIntoPrompt(currentSessionRecords);
+    }
+    lastNotifiedAt = maxFinishedAt;
+    saveLastNotified(maxFinishedAt);
+  } finally {
+    notifyInFlight = false;
   }
-  if (currentSessionRecords.length > 0) {
-    await injectBatchIntoPrompt(currentSessionRecords);
-  }
-  lastNotifiedAt = maxFinishedAt;
-  saveLastNotified(maxFinishedAt);
 }
 async function autoNotifyOnResume(config2) {
   if (!pluginClient)
@@ -15303,4 +15311,4 @@ export {
   slugify
 };
 
-//# debugId=D1DC725E622D1CB364756E2164756E21
+//# debugId=1739B58884519EF164756E2164756E21

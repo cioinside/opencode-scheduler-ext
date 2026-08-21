@@ -4,6 +4,34 @@ All notable changes to **opencode-scheduler-ext** are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.6.1-ext.1] — 2026-08-21
+
+### Fixed (race protection for `notifyCompletedRuns`)
+
+- **Race condition**: Wave 8's background poll calls
+  `notifyCompletedRuns` every 30s, while the `chat.message` hook also
+  calls it on every user turn. If both fired within the same tick
+  window (microseconds), both could read `lastNotifiedAt` before either
+  updated it, causing duplicate `injectBatchIntoSession` /
+  `client.session.prompt` calls and two toasts for the same run.
+
+- **Fix**: `notifyInFlight` boolean module flag. `notifyCompletedRuns`
+  skips immediately if already running; sets `true` on entry, clears
+  in `finally` so a mid-run throw does not permanently jam the
+  pipeline. The skipped caller simply returns — the in-flight call
+  will update `lastNotifiedAt`, so the skipped caller's next attempt
+  (next poll tick or next chat.message) sees no fresh records.
+
+- **Trade-off**: the skipped caller does NOT do its own routing.
+  Acceptable because the in-flight caller's routing covers all paths
+  (current-session `appendPrompt` + per-session silent inject +
+  toast). The skipped caller will not re-route on next invocation
+  because `lastNotifiedAt` already advanced.
+
+- Tests: 71/71 pass (4 new in `test/plugin-entry.test.ts` Wave 8.1
+  block: `notifyInFlight` module var, skip-if-in-flight, try/finally
+  wrap + flag clear, pluginClient guard preserved).
+
 ## [1.6.0-ext.1] — 2026-08-21
 
 ### Fixed (background poll for scheduled-run notifications)
