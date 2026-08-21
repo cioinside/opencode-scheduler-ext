@@ -14223,6 +14223,13 @@ function isCliMode() {
     return true;
   return CLI_SUBCOMMANDS.has(first);
 }
+function isUserMode() {
+  try {
+    if (typeof process.getuid === "function" && process.getuid() !== 0)
+      return true;
+  } catch {}
+  return false;
+}
 function loadLastNotified() {
   try {
     if (!existsSync(LAST_NOTIFIED_PATH))
@@ -14438,6 +14445,8 @@ function groupFreshBySession(records, additionalRoots = []) {
   return map2;
 }
 async function injectBatchIntoSession(sessionId, records) {
+  if (isUserMode())
+    return;
   if (!pluginClient || records.length === 0)
     return;
   const summary = formatBatchSummary(records);
@@ -14451,6 +14460,8 @@ async function injectBatchIntoSession(sessionId, records) {
   }
 }
 async function triggerAgentOnSession(sessionId) {
+  if (isUserMode())
+    return;
   if (!pluginClient)
     return;
   try {
@@ -14488,11 +14499,17 @@ async function notifyCompletedRuns() {
       await emitBatchToast(fresh);
       const bySession = groupFreshBySession(fresh, additionalRoots);
       const currentSessionRecords = [];
-      for (const [sid, records] of bySession) {
-        if (!sid || sid === lastChatSessionId) {
+      if (isUserMode()) {
+        for (const records of bySession.values()) {
           currentSessionRecords.push(...records);
-        } else {
-          await injectBatchIntoSession(sid, records);
+        }
+      } else {
+        for (const [sid, records] of bySession) {
+          if (!sid || sid === lastChatSessionId) {
+            currentSessionRecords.push(...records);
+          } else {
+            await injectBatchIntoSession(sid, records);
+          }
         }
       }
       if (currentSessionRecords.length > 0) {
@@ -14525,12 +14542,22 @@ async function autoNotifyOnResume(config2) {
       fresh.sort((a, b) => a.finishedAt < b.finishedAt ? -1 : 1);
       await emitBatchToast(fresh);
       const bySession = groupFreshBySession(fresh, additionalRoots);
-      for (const [sid, records] of bySession) {
-        if (!sid)
-          continue;
-        await injectBatchIntoSession(sid, records);
-        if (mode === "active") {
-          await triggerAgentOnSession(sid);
+      if (isUserMode()) {
+        const allRecords = [];
+        for (const records of bySession.values()) {
+          allRecords.push(...records);
+        }
+        if (allRecords.length > 0) {
+          await injectBatchIntoPrompt(allRecords);
+        }
+      } else {
+        for (const [sid, records] of bySession) {
+          if (!sid)
+            continue;
+          await injectBatchIntoSession(sid, records);
+          if (mode === "active") {
+            await triggerAgentOnSession(sid);
+          }
         }
       }
       lastNotifiedAt = maxFinishedAt;
@@ -15429,4 +15456,4 @@ export {
   src_default as default
 };
 
-//# debugId=CA4CA02CA1C359A264756E2164756E21
+//# debugId=FB3D0A554DB991A464756E2164756E21

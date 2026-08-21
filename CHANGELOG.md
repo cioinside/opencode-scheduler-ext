@@ -4,6 +4,58 @@ All notable changes to **opencode-scheduler-ext** are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.6.4-ext.7] — 2026-08-21
+
+### Fixed (TUI under non-root user spammed cascade errors every 30s)
+
+After ext.6 made TUI launch cleanly under user, the plugin started running
+its notification loop. But every cycle produced 4+ error lines in the TUI:
+
+```
+[scheduler-ext] notifyCompletedRuns internal error: ...
+  notifyCompletedRuns.total timed out after 7000ms
+[scheduler-ext] injectBatchIntoSession failed for ses_xxx
+  injectBatchIntoSession.session.prompt timed out after 5000ms
+[scheduler-ext] triggerAgentOnSession failed for ses_xxx
+  triggerAgentOnSession.session.prompt timed out after 5000ms
+[scheduler-ext] injectBatchIntoSession failed for ses_yyy
+  injectBatchIntoSession.session.prompt timed out after 5000ms
+... (one per session)
+```
+
+**Root cause:** under non-root, `pluginClient.session.prompt()` cannot
+authenticate against the root-owned opencode-server. Every call hangs ~5s
+and then times out. With 4+ completed runs spread across sessions, the
+per-session loop accumulates 5s × N = >7s, tripping the
+`notifyCompletedRuns.total` timeout too.
+
+`injectBatchIntoPrompt` (via `tui.appendPrompt`) and `emitBatchToast`
+(via `tui.showToast`) DO work under non-root — those use the local TTY,
+not the opencode-server API.
+
+**Fix:** added `isUserMode()` helper (uid !== 0) and gated all
+`session.prompt`-based paths behind it. Under non-root:
+
+- `injectBatchIntoSession(sessionId, records)` — early-return (no-op)
+- `triggerAgentOnSession(sessionId)` — early-return (no-op)
+- `notifyCompletedRuns` per-session loop — replaced with "flatten all
+  bySession values into `currentSessionRecords`" so everything goes
+  to `injectBatchIntoPrompt` (current TUI) instead
+- `autoNotifyOnResume` per-session loop — replaced with
+  `injectBatchIntoPrompt(allRecords)` (current TUI). Note: this path
+  previously didn't call `injectBatchIntoPrompt` at all under any user,
+  so non-root users now get the prompt injection that root already got.
+
+Under root (uid === 0) behavior is unchanged.
+
+#### Verification
+
+- TUI under user: `[scheduler-ext] injectBatchIntoPrompt: 45 records -> current TUI`,
+  zero error lines, no more cascade
+- TUI under root: unchanged behavior (per-session inject + agent trigger still runs)
+- 89/89 unit tests pass (regex `(?:export\s+)?function notifyCompletedRuns`
+  from ext.6 still matches)
+
 ## [1.6.4-ext.6] — 2026-08-21
 
 ### Fixed (TUI under non-root user crashed with "Unexpected server error")

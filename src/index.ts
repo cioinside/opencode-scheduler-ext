@@ -2388,6 +2388,13 @@ function isCliMode(): boolean {
   return CLI_SUBCOMMANDS.has(first)
 }
 
+function isUserMode(): boolean {
+  try {
+    if (typeof process.getuid === "function" && process.getuid() !== 0) return true
+  } catch {}
+  return false
+}
+
 function loadLastNotified(): string | null {
   try {
     if (!existsSync(LAST_NOTIFIED_PATH)) return null
@@ -2667,6 +2674,7 @@ function groupFreshBySession(
 }
 
 async function injectBatchIntoSession(sessionId: string, records: RunRecord[]): Promise<void> {
+  if (isUserMode()) return
   if (!pluginClient || records.length === 0) return
   const summary = formatBatchSummary(records)
   try {
@@ -2692,6 +2700,7 @@ async function injectBatchIntoSession(sessionId: string, records: RunRecord[]): 
 }
 
 async function triggerAgentOnSession(sessionId: string): Promise<void> {
+  if (isUserMode()) return
   if (!pluginClient) return
   try {
     await withTimeout(
@@ -2739,11 +2748,17 @@ async function notifyCompletedRuns(): Promise<void> {
         const bySession = groupFreshBySession(fresh, additionalRoots)
         const currentSessionRecords: RunRecord[] = []
 
-        for (const [sid, records] of bySession) {
-          if (!sid || sid === lastChatSessionId) {
+        if (isUserMode()) {
+          for (const records of bySession.values()) {
             currentSessionRecords.push(...records)
-          } else {
-            await injectBatchIntoSession(sid, records)
+          }
+        } else {
+          for (const [sid, records] of bySession) {
+            if (!sid || sid === lastChatSessionId) {
+              currentSessionRecords.push(...records)
+            } else {
+              await injectBatchIntoSession(sid, records)
+            }
           }
         }
 
@@ -2788,11 +2803,21 @@ async function autoNotifyOnResume(config?: SchedulerConfig): Promise<void> {
 
         const bySession = groupFreshBySession(fresh, additionalRoots)
 
-        for (const [sid, records] of bySession) {
-          if (!sid) continue
-          await injectBatchIntoSession(sid, records)
-          if (mode === "active") {
-            await triggerAgentOnSession(sid)
+        if (isUserMode()) {
+          const allRecords: RunRecord[] = []
+          for (const records of bySession.values()) {
+            allRecords.push(...records)
+          }
+          if (allRecords.length > 0) {
+            await injectBatchIntoPrompt(allRecords)
+          }
+        } else {
+          for (const [sid, records] of bySession) {
+            if (!sid) continue
+            await injectBatchIntoSession(sid, records)
+            if (mode === "active") {
+              await triggerAgentOnSession(sid)
+            }
           }
         }
 
