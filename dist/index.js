@@ -12340,6 +12340,13 @@ import { basename, dirname, join, resolve as resolvePath } from "path";
 import { homedir, platform } from "os";
 import { execFileSync, execSync, spawn } from "child_process";
 import { fileURLToPath } from "url";
+
+// src/util/slug.ts
+function slugify(name) {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+}
+
+// src/index.ts
 var OPENCODE_CONFIG = join(homedir(), ".config", "opencode");
 var LEGACY_JOBS_DIR = join(OPENCODE_CONFIG, "jobs");
 var LOGS_DIR = join(OPENCODE_CONFIG, "logs");
@@ -12362,8 +12369,8 @@ function ensureDir(dir) {
     mkdirSync(dir, { recursive: true });
   }
 }
-function slugify(name) {
-  return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+function slugify2(name) {
+  return slugify(name);
 }
 function normalizeWorkdirPath(input) {
   const trimmed = input.trim();
@@ -12386,7 +12393,7 @@ function fnv1a64Hex(input) {
 }
 function deriveScopeId(workdir) {
   const normalized = normalizeWorkdirPath(workdir);
-  const base = slugify(basename(normalized)) || "workspace";
+  const base = slugify2(basename(normalized)) || "workspace";
   const suffix = fnv1a64Hex(normalized).slice(0, 12);
   return `${base}-${suffix}`;
 }
@@ -14011,7 +14018,7 @@ function normalizeJob(raw) {
 }
 function findJobByName(name, options) {
   const scopeId = options?.scopeId ?? currentScopeId();
-  const slug = slugify(name);
+  const slug = slugify2(name);
   let job = loadScopedJob(scopeId, slug) || loadScopedJob(scopeId, name);
   if (!job) {
     const allJobs = loadAllScopedJobs(scopeId);
@@ -14161,12 +14168,29 @@ var PLUGIN_CLIENT_TIMEOUT_MS = 5000;
 var PLUGIN_CLIENT_TOTAL_TIMEOUT_MS = 7000;
 function withTimeout(promise2, ms, label) {
   let timer = null;
-  const timeout = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`[scheduler-ext] ${label} timed out after ${ms}ms`)), ms);
-  });
-  return Promise.race([promise2, timeout]).finally(() => {
-    if (timer)
-      clearTimeout(timer);
+  let settled = false;
+  return new Promise((resolve, reject) => {
+    timer = setTimeout(() => {
+      if (settled)
+        return;
+      settled = true;
+      reject(new Error(`[scheduler-ext] ${label} timed out after ${ms}ms`));
+    }, ms);
+    promise2.then((val) => {
+      if (settled)
+        return;
+      settled = true;
+      if (timer)
+        clearTimeout(timer);
+      resolve(val);
+    }, (err) => {
+      if (settled)
+        return;
+      settled = true;
+      if (timer)
+        clearTimeout(timer);
+      reject(err);
+    });
   });
 }
 var CLI_SUBCOMMANDS = new Set([
@@ -14816,7 +14840,7 @@ var SchedulerPlugin = async (input) => {
         },
         async execute(args) {
           const format = normalizeFormat(args.format);
-          const slug = args.source ? `${slugify(args.source)}-${slugify(args.name)}` : slugify(args.name);
+          const slug = args.source ? `${slugify2(args.source)}-${slugify2(args.name)}` : slugify2(args.name);
           const workdir = normalizeWorkdirPath(args.workdir || process.cwd());
           const scopeId = deriveScopeId(workdir);
           if (loadScopedJob(scopeId, slug)) {
@@ -15402,9 +15426,7 @@ ${logs}`, { job, logPath, logs });
 var src_default = SchedulerPlugin;
 export {
   SchedulerPlugin,
-  src_default as default,
-  notifyCompletedRuns,
-  slugify
+  src_default as default
 };
 
-//# debugId=826384F7EC8A256964756E2164756E21
+//# debugId=CA4CA02CA1C359A264756E2164756E21

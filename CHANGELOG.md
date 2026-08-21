@@ -4,6 +4,70 @@ All notable changes to **opencode-scheduler-ext** are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.6.4-ext.6] — 2026-08-21
+
+### Fixed (TUI under non-root user crashed with "Unexpected server error")
+
+After v1.6.4-ext.5 the user's `opencode mcp list` worked in 4s, but
+**TUI mode** (`opencode` with no subcommand, run from `/projects/qtrader`)
+crashed immediately with:
+
+```
+Error: Unexpected server error. Check server logs for details.
+    at <anonymous> (/$bunfs/root/chunk-rcvbhse6.js:8:7615)
+```
+
+Server logs showed the deeper cause:
+
+```
+level=ERROR message="failed to load plugin" path=opencode-scheduler
+  error="name.toLowerCase is not a function"
+level=ERROR message="plugin config hook failed"
+  error="undefined is not an object (evaluating 'N.config')"
+```
+
+Two distinct problems, both in the same module:
+
+#### Problem 1 — Unhandled rejection from `Promise.race`
+
+The v1.6.4-ext.5 `withTimeout(promise, ms, label)` used
+`Promise.race([promise, timeout])`. When `promise` settled first
+(e.g. `pluginClient.tui.showToast` rejecting because user can't
+authenticate against root's opencode-server), the race resolved with
+`promise`'s outcome. But the **loser** `timeout` Promise was orphaned:
+its `setTimeout` was still scheduled, fired later, and called
+`reject(...)` on an already-orphaned Promise. That rejection had no
+handler attached → unhandled rejection event. opencode's CLI side
+translates unhandled hook rejections into "Unexpected server error".
+
+**Fix:** rewrite `withTimeout` with manual settle logic (no
+`Promise.race`). One outer Promise, two handlers attached to
+`promise.then(resolve, reject)` plus a `setTimeout` that calls
+`reject` with the timeout error. A `settled` flag + `clearTimeout`
+ensure exactly one of `resolve/ reject` fires and the other side is
+cancelled — no orphaned Promise, no unhandled rejection.
+
+#### Problem 2 — Surplus exports triggering plugin-loader iteration
+
+The plugin module exported three things:
+`SchedulerPlugin`, `notifyCompletedRuns`, `slugify`. opencode-server's
+plugin loader iterates **all** exports looking for plugin metadata,
+and one of them was tripping on `name.toLowerCase is not a function`
+for some internal access pattern (possibly unrelated to those two
+functions specifically, but caused by the surplus surface area).
+
+**Fix:** drop the `export` keyword from `notifyCompletedRuns` and
+`slugify` (both are pure-internal helpers, called only from
+`SchedulerPlugin` / `startBackgroundPoll` / `chat.message` hook).
+`SchedulerPlugin` and `default` remain as the only exports.
+
+#### Verification
+
+- `opencode mcp list` under user: **4s ✓** (unchanged)
+- `opencode` (TUI) under user, run from `/projects/qtrader`: **opens cleanly ✓** (was "Unexpected server error")
+- Server logs: no more `failed to load plugin` errors, no more unhandled rejections
+- 89/89 unit tests still pass
+
 ## [1.6.4-ext.5] — 2026-08-21
 
 ### Fixed (CLI commands still took 10-15s under non-root users despite timeouts)

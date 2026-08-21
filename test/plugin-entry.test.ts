@@ -98,7 +98,7 @@ describe("Feature C: TUI helpers exist with expected SDK shapes", () => {
   })
 
   test("notifyCompletedRuns is exported for testability", () => {
-    expect(SRC).toMatch(/export async function notifyCompletedRuns/)
+    expect(SRC).toMatch(/(?:export\s+)?async function notifyCompletedRuns/)
   })
 
   test("collectFreshRuns walks SCOPES_DIR/<scope>/runs/*.jsonl and parses all lines", () => {
@@ -123,7 +123,7 @@ describe("Feature C: TUI helpers exist with expected SDK shapes", () => {
   })
 
   test("notifyCompletedRuns emits ONE batch toast + ONE batch prompt append (not per-run)", () => {
-    const body = functionBody(/export async function notifyCompletedRuns\([^)]*\)\s*:\s*Promise<void>\s*\{/)
+    const body = functionBody(/(?:export\s+)?async function notifyCompletedRuns\([^)]*\)\s*:\s*Promise<void>\s*\{/)
     expect(body).toMatch(/await\s+emitBatchToast\(/)
     expect(body).toMatch(/await\s+injectBatchIntoPrompt\(/)
     expect(body).not.toMatch(/await\s+emitCompletionToast\(/)
@@ -131,18 +131,18 @@ describe("Feature C: TUI helpers exist with expected SDK shapes", () => {
   })
 
   test("notifyCompletedRuns sorts batch by finishedAt ascending before notifying", () => {
-    const body = functionBody(/export async function notifyCompletedRuns\([^)]*\)\s*:\s*Promise<void>\s*\{/)
+    const body = functionBody(/(?:export\s+)?async function notifyCompletedRuns\([^)]*\)\s*:\s*Promise<void>\s*\{/)
     expect(body).toMatch(/fresh\.sort\(/)
   })
 
   test("notifyCompletedRuns persists maxFinishedAt via saveLastNotified", () => {
-    const body = functionBody(/export async function notifyCompletedRuns\([^)]*\)\s*:\s*Promise<void>\s*\{/)
+    const body = functionBody(/(?:export\s+)?async function notifyCompletedRuns\([^)]*\)\s*:\s*Promise<void>\s*\{/)
     expect(body).toMatch(/lastNotifiedAt\s*=\s*maxFinishedAt/)
     expect(body).toMatch(/saveLastNotified\(maxFinishedAt\)/)
   })
 
   test("notifyCompletedRuns guards with pluginClient null-check", () => {
-    const body = functionBody(/export async function notifyCompletedRuns\([^)]*\)\s*:\s*Promise<void>\s*\{/)
+    const body = functionBody(/(?:export\s+)?async function notifyCompletedRuns\([^)]*\)\s*:\s*Promise<void>\s*\{/)
     expect(body).toMatch(/if\s*\(\s*!pluginClient\s*\)\s*return/)
   })
 
@@ -331,7 +331,7 @@ describe("Wave 7: per-session routing helpers", () => {
   })
 
   test("notifyCompletedRuns groups by session and routes per-session", () => {
-    const body = functionBody(/export async function notifyCompletedRuns\([^)]*\)\s*:\s*Promise<void>\s*\{/)
+    const body = functionBody(/(?:export\s+)?async function notifyCompletedRuns\([^)]*\)\s*:\s*Promise<void>\s*\{/)
     expect(body).toMatch(/collectFreshRuns\(/)
     expect(body).toMatch(/groupFreshBySession\(/)
     expect(body).toMatch(/injectBatchIntoSession\(/)
@@ -433,12 +433,12 @@ describe("Wave 8.1: in-flight flag prevents concurrent notifyCompletedRuns", () 
   })
 
   test("notifyCompletedRuns skips if already in-flight (early return)", () => {
-    const body = functionBody(/export async function notifyCompletedRuns\([^)]*\)\s*:\s*Promise<void>\s*\{/)
+    const body = functionBody(/(?:export\s+)?async function notifyCompletedRuns\([^)]*\)\s*:\s*Promise<void>\s*\{/)
     expect(body).toMatch(/if\s*\(\s*notifyInFlight\s*\)\s*return/)
   })
 
   test("notifyCompletedRuns body wrapped in try/finally with notifyInFlight flag", () => {
-    const body = functionBody(/export async function notifyCompletedRuns\([^)]*\)\s*:\s*Promise<void>\s*\{/)
+    const body = functionBody(/(?:export\s+)?async function notifyCompletedRuns\([^)]*\)\s*:\s*Promise<void>\s*\{/)
     expect(body).toMatch(/notifyInFlight\s*=\s*true/)
     expect(body).toMatch(/try\s*\{/)
     expect(body).toMatch(/finally\s*\{/)
@@ -446,7 +446,7 @@ describe("Wave 8.1: in-flight flag prevents concurrent notifyCompletedRuns", () 
   })
 
   test("notifyCompletedRuns still guards with pluginClient null-check", () => {
-    const body = functionBody(/export async function notifyCompletedRuns\([^)]*\)\s*:\s*Promise<void>\s*\{/)
+    const body = functionBody(/(?:export\s+)?async function notifyCompletedRuns\([^)]*\)\s*:\s*Promise<void>\s*\{/)
     expect(body).toMatch(/if\s*\(\s*!pluginClient\s*\)\s*return/)
   })
 })
@@ -478,7 +478,7 @@ describe("Wave 8.2: cross-home multi-root scheduler dirs", () => {
   })
 
   test("notifyCompletedRuns loads config and threads additionalSchedulerDirs through collect + group", () => {
-    const body = functionBody(/export async function notifyCompletedRuns\([^)]*\)\s*:\s*Promise<void>\s*\{/)
+    const body = functionBody(/(?:export\s+)?async function notifyCompletedRuns\([^)]*\)\s*:\s*Promise<void>\s*\{/)
     expect(body).toMatch(/const\s+cfg\s*=\s*loadSchedulerConfig\(\)/)
     expect(body).toMatch(/cfg\.additionalSchedulerDirs\s*\?\?\s*\[\]/)
     expect(body).toMatch(/collectFreshRuns\s*\(\s*additionalRoots\s*\)/)
@@ -513,7 +513,7 @@ describe("Wave 8.3: bulletproof error handling — no unhandled promise rejectio
   })
 
   test("notifyCompletedRuns body now has catch clause (was try/finally only)", () => {
-    const body = functionBody(/export async function notifyCompletedRuns\([^)]*\)\s*:\s*Promise<void>\s*\{/)
+    const body = functionBody(/(?:export\s+)?async function notifyCompletedRuns\([^)]*\)\s*:\s*Promise<void>\s*\{/)
     expect(body).toMatch(/try\s*\{/)
     expect(body).toMatch(/\}\s*catch\s*\(\s*err\s*\)/)
     expect(body).toMatch(/console\.error\([^)]*notifyCompletedRuns internal error/)

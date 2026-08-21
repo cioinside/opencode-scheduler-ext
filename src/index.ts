@@ -18,6 +18,7 @@ import { basename, dirname, join, resolve as resolvePath } from "path"
 import { homedir, platform } from "os"
 import { execFileSync, execSync, spawn, type ChildProcess } from "child_process"
 import { fileURLToPath } from "url"
+import { slugify as slugUtil } from "./util/slug"
 
 // Storage location - shared with other opencode tools
 const OPENCODE_CONFIG = join(homedir(), ".config", "opencode")
@@ -56,11 +57,8 @@ function ensureDir(dir: string) {
 }
 
 // Slugify a name
-export function slugify(name: string): string {
-  return name
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-|-$/g, "")
+function slugify(name: string): string {
+  return slugUtil(name)
 }
 
 function normalizeWorkdirPath(input: string): string {
@@ -2350,12 +2348,29 @@ const PLUGIN_CLIENT_TIMEOUT_MS = 5000
 const PLUGIN_CLIENT_TOTAL_TIMEOUT_MS = 7000
 
 function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  // Manual settle (not Promise.race) so the loser promise's rejection is never unhandled (opencode translates unhandled hook rejections into "Unexpected server error").
   let timer: ReturnType<typeof setTimeout> | null = null
-  const timeout = new Promise<T>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`[scheduler-ext] ${label} timed out after ${ms}ms`)), ms)
-  })
-  return Promise.race([promise, timeout]).finally(() => {
-    if (timer) clearTimeout(timer)
+  let settled = false
+  return new Promise<T>((resolve, reject) => {
+    timer = setTimeout(() => {
+      if (settled) return
+      settled = true
+      reject(new Error(`[scheduler-ext] ${label} timed out after ${ms}ms`))
+    }, ms)
+    promise.then(
+      (val) => {
+        if (settled) return
+        settled = true
+        if (timer) clearTimeout(timer)
+        resolve(val)
+      },
+      (err) => {
+        if (settled) return
+        settled = true
+        if (timer) clearTimeout(timer)
+        reject(err)
+      },
+    )
   })
 }
 
@@ -2703,7 +2718,7 @@ async function triggerAgentOnSession(sessionId: string): Promise<void> {
   }
 }
 
-export async function notifyCompletedRuns(): Promise<void> {
+async function notifyCompletedRuns(): Promise<void> {
   if (notifyInFlight) return
   if (!pluginClient) return
   if (isCliMode()) return

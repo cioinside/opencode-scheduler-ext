@@ -1,7 +1,7 @@
 import { describe, test, expect } from "bun:test"
 import { readFileSync } from "node:fs"
 import { join } from "node:path"
-import { slugify } from "../src/index.ts"
+import { slugify } from "../src/util/slug.ts"
 
 const REPO_ROOT = join(import.meta.dir, "..")
 const SRC = readFileSync(join(REPO_ROOT, "src", "index.ts"), "utf8")
