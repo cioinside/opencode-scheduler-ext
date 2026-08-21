@@ -4,6 +4,30 @@ All notable changes to **opencode-scheduler-ext** are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.6.4-ext.8] — 2026-08-21
+
+### Fixed (grammar in injectBatchIntoPrompt log)
+
+The log line `injectBatchIntoPrompt: 1 records -> current TUI` had wrong
+pluralization. Now: `1 record -> current TUI` for singular,
+`N records -> current TUI` for N >= 2.
+
+```
+[scheduler-ext] injectBatchIntoPrompt: 1 record -> current TUI     (was: "1 records")
+[scheduler-ext] injectBatchIntoPrompt: 2 records -> current TUI    (unchanged)
+```
+
+Note: notification **frequency** is by design — `notifyCompletedRuns`
+runs every `pollIntervalSec` (default 30s) and emits a log line each
+time it finds at least one fresh completed run. If the user has many
+scheduled jobs completing frequently (e.g. 18 scalper-related jobs
+in `qtrader-*` scopes), they will see one log line every poll cycle
+that has new completions. To reduce frequency:
+
+- Increase `autoNotify.pollIntervalSec` in scheduler config (default 30s)
+- Reduce number of scheduled jobs
+- Set `autoNotify.mode` to `"passive"` to skip auto-trigger but keep polling
+
 ## [1.6.4-ext.7] — 2026-08-21
 
 ### Fixed (TUI under non-root user spammed cascade errors every 30s)

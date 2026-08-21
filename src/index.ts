@@ -2587,7 +2587,7 @@ async function injectBatchIntoPrompt(records: RunRecord[]): Promise<void> {
   console.error(
     "[scheduler-ext] injectBatchIntoPrompt:",
     records.length,
-    "records -> current TUI",
+    records.length === 1 ? "record -> current TUI" : "records -> current TUI",
   )
   try {
     await withTimeout(
