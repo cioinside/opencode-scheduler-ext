@@ -4,6 +4,75 @@ All notable changes to **opencode-scheduler-ext** are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.6.4-ext.13] — 2026-08-21
+
+### Changed (SQLite-backed multi-consumer notification store)
+
+Replaces the JSONL+cursor model of ext.12 with a SQLite store under
+`~/.config/opencode/scheduler/scheduler.db`. The supervisor.pl producer
+side is unchanged (still appends JSONL); the plugin consumer side now
+ingests JSONL into SQLite and reads from SQLite per-consumer. Each TUI
+instance, CLI dashboard, or external webhook tracks its own cursor in
+the `consumers` table — independent `last_id` per consumer, no race.
+
+Why this matters for multi-consumer scenarios:
+- JSONL with a single file cursor forces every consumer to share
+  position. If a second consumer comes online, it would either
+  re-consume old lines (start at 0) or skip ahead to the first consumer's
+  cursor (missing lines).
+- SQLite gives each consumer a row keyed by `consumer_id`, atomically
+  advanced via `INSERT … ON CONFLICT(consumer_id) DO UPDATE`. The
+  `notifications` table has a `UNIQUE(run_id)` constraint so duplicate
+  ingestion from multiple TUI processes is idempotent.
+
+Producer side (unchanged):
+- `supervisor.pl` appends one JSONL line per completed run.
+
+Consumer side (new):
+```ts
+const consumerId = getConsumerId()                   // persistent UUID
+pollNotificationsDb(consumerId)                      // tick handler
+  └─ ingestJsonlToDb(db)                             // new JSONL → DB
+  └─ SELECT … FROM notifications WHERE id > lastId
+  └─ pluginClient.tui.appendPrompt({ text: summary })// inject
+  └─ UPSERT consumers SET last_id = maxSeenId        // per-consumer cursor
+```
+
+Schema:
+```sql
+CREATE TABLE notifications (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  timestamp   TEXT NOT NULL,
+  scope_id    TEXT NOT NULL,
+  slug        TEXT NOT NULL,
+  run_id      TEXT NOT NULL UNIQUE,
+  status      TEXT NOT NULL,
+  exit_code   INTEGER,
+  finished_at TEXT NOT NULL,
+  duration_ms INTEGER,
+  log_path    TEXT
+);
+CREATE TABLE consumers (
+  consumer_id TEXT PRIMARY KEY,
+  last_id     INTEGER NOT NULL DEFAULT 0,
+  updated_at  TEXT NOT NULL
+);
+CREATE INDEX idx_notifications_finished_at
+  ON notifications(finished_at);
+```
+
+DB settings: `journal_mode = WAL`, `synchronous = NORMAL` — safe for
+concurrent readers/writers from multiple TUI/CLI processes.
+
+Backwards compatible:
+- `notifications.jsonl` and `notifications.cursor` are still produced
+  and consumed (existing ext.12 path). ext.13 layers SQLite on top;
+  migration is automatic (no schema version bump needed, first run
+  just creates the tables).
+
+Related: L13 lesson will be recorded in
+`experience-records/experience/opencode-scheduler-cross-home-multiroot/note-v12.md`.
+
 ## [1.6.4-ext.12] — 2026-08-21
 
 ### Fixed (file-based notifications — cross-server TUI delivery)

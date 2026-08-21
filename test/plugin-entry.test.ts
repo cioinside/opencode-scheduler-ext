@@ -583,3 +583,71 @@ describe("Wave 8.3: bulletproof error handling — no unhandled promise rejectio
     expect(body).toMatch(/console\.error\([^)]*plugin loaded, lastNotifiedAt=/)
   })
 })
+
+describe("ext.13: SQLite-backed multi-consumer notification store", () => {
+  test("imports Database from bun:sqlite", () => {
+    expect(SRC).toMatch(/import\s*\{\s*Database\s*\}\s*from\s*["']bun:sqlite["']/)
+  })
+
+  test("NOTIFICATIONS_DB_PATH and CONSUMER_ID_PATH constants exist under SCHEDULER_DIR", () => {
+    expect(SRC).toMatch(/NOTIFICATIONS_DB_PATH\s*=\s*join\(SCHEDULER_DIR\s*,\s*["']scheduler\.db["']\)/)
+    expect(SRC).toMatch(/CONSUMER_ID_PATH\s*=\s*join\(SCHEDULER_DIR\s*,\s*["']consumer\.id["']\)/)
+  })
+
+  test("getConsumerId reads from CONSUMER_ID_PATH and falls back to randomUUID + writeFileSync", () => {
+    const body = extractFnBody("getConsumerId")
+    expect(body).toMatch(/existsSync\(CONSUMER_ID_PATH\)/)
+    expect(body).toMatch(/readFileSync\(CONSUMER_ID_PATH/)
+    expect(body).toMatch(/randomUUID/)
+    expect(body).toMatch(/writeFileSync\(CONSUMER_ID_PATH/)
+  })
+
+  test("getDb opens Database with create:true + WAL mode + schema migration", () => {
+    const body = extractFnBody("getDb")
+    expect(body).toMatch(/new\s+Database\(NOTIFICATIONS_DB_PATH\s*,\s*\{\s*create:\s*true\s*\}\)/)
+    expect(body).toMatch(/PRAGMA\s+journal_mode\s*=\s*WAL/)
+    expect(body).toMatch(/CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+notifications/)
+    expect(body).toMatch(/CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+consumers/)
+    expect(body).toMatch(/run_id\s+TEXT\s+NOT\s+NULL\s+UNIQUE/)
+    expect(body).toMatch(/consumer_id\s+TEXT\s+PRIMARY\s+KEY/)
+  })
+
+  test("ingestJsonlToDb reads new JSONL lines, INSERTs OR IGNOREs by run_id, advances cursor", () => {
+    const body = extractFnBody("ingestJsonlToDb")
+    expect(body).toMatch(/readFileSync\(NOTIFICATIONS_PATH/)
+    expect(body).toMatch(/INSERT\s+OR\s+IGNORE\s+INTO\s+notifications/)
+    expect(body).toMatch(/db\.transaction\(/)
+    expect(body).toMatch(/saveNotificationsCursor/)
+  })
+
+  test("pollNotificationsDb reads unconsumed rows for this consumer + calls appendPrompt", () => {
+    const body = extractFnBody("pollNotificationsDb")
+    expect(body).toMatch(/SELECT\s+last_id\s+FROM\s+consumers\s+WHERE\s+consumer_id\s*=/)
+    expect(body).toMatch(/WHERE\s+id\s*>\s*\?/)
+    expect(body).toMatch(/pluginClient(\??)\.tui\.appendPrompt/)
+    expect(body).toMatch(/ON\s+CONFLICT\(consumer_id\)\s+DO\s+UPDATE\s+SET/)
+  })
+
+  test("pollNotificationsDb delegates ingestion via ingestJsonlToDb before querying", () => {
+    const body = extractFnBody("pollNotificationsDb")
+    expect(body).toMatch(/ingestJsonlToDb\(db\)/)
+    expect(body).toMatch(/SELECT[\s\S]*FROM\s+notifications/)
+  })
+
+  test("startBackgroundPoll calls pollNotificationsDb (not pollNotificationsFile)", () => {
+    const body = functionBody(/function startBackgroundPoll\([^)]*\)\s*:\s*void\s*\{/)
+    expect(body).toMatch(/pollNotificationsDb/)
+    expect(body).not.toMatch(/pollNotificationsFile/)
+  })
+
+  test("startBackgroundPoll captures a stable consumerId once per tick", () => {
+    const body = functionBody(/function startBackgroundPoll\([^)]*\)\s*:\s*void\s*\{/)
+    expect(body).toMatch(/getConsumerId\(\)/)
+    expect(body).toMatch(/pollNotificationsDb\(consumerId\)/)
+  })
+
+  test("injectBatchIntoPrompt still delegates to appendNotificationsToFile (ext.12 producer side)", () => {
+    const body = functionBody(/async function injectBatchIntoPrompt\([^)]*\)\s*:\s*Promise<void>\s*\{/)
+    expect(body).toContain("appendNotificationsToFile")
+  })
+})

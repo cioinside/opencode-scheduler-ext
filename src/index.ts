@@ -16,6 +16,8 @@ import { tool } from "@opencode-ai/plugin"
 import { appendFileSync, createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync, unlinkSync } from "fs"
 import { basename, dirname, join, resolve as resolvePath } from "path"
 import { homedir, platform } from "os"
+import { randomUUID } from "crypto"
+import { Database } from "bun:sqlite"
 import { execFileSync, execSync, spawn, type ChildProcess } from "child_process"
 import { fileURLToPath } from "url"
 import { slugify as slugUtil } from "./util/slug"
@@ -31,6 +33,8 @@ const SCHEDULER_CONFIG = join(OPENCODE_CONFIG, "opencode-scheduler.json")
 const LAST_NOTIFIED_PATH = join(SCHEDULER_DIR, "last-notified-at.txt")
 const NOTIFICATIONS_PATH = join(SCHEDULER_DIR, "notifications.jsonl")
 const NOTIFICATIONS_CURSOR_PATH = join(SCHEDULER_DIR, "notifications.cursor")
+const NOTIFICATIONS_DB_PATH = join(SCHEDULER_DIR, "scheduler.db")
+const CONSUMER_ID_PATH = join(SCHEDULER_DIR, "consumer.id")
 
 // Platform detection
 const IS_MAC = platform() === "darwin"
@@ -2686,56 +2690,162 @@ function saveNotificationsCursor(n: number): void {
 
 let notificationsCursor: number | null = null
 
-async function pollNotificationsFile(): Promise<void> {
-  if (!pluginClient) return
-  if (notificationsCursor === null) {
-    notificationsCursor = loadNotificationsCursor()
+function getConsumerId(): string {
+  try {
+    if (existsSync(CONSUMER_ID_PATH)) {
+      const raw = readFileSync(CONSUMER_ID_PATH, "utf-8").trim()
+      if (raw.length > 0) return raw
+    }
+  } catch {}
+  const id = randomUUID()
+  try {
+    ensureDir(SCHEDULER_DIR)
+    writeFileSync(CONSUMER_ID_PATH, id, { mode: 0o600 })
+  } catch (err) {
+    console.error(
+      "[scheduler-ext] failed to persist consumer.id:",
+      err instanceof Error ? err.message : String(err),
+    )
   }
+  return id
+}
+
+function getDb(): Database | null {
+  try {
+    const db = new Database(NOTIFICATIONS_DB_PATH, { create: true })
+    db.exec("PRAGMA journal_mode = WAL")
+    db.exec("PRAGMA synchronous = NORMAL")
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS notifications (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp TEXT NOT NULL,
+        scope_id TEXT NOT NULL,
+        slug TEXT NOT NULL,
+        run_id TEXT NOT NULL UNIQUE,
+        status TEXT NOT NULL,
+        exit_code INTEGER,
+        finished_at TEXT NOT NULL,
+        duration_ms INTEGER,
+        log_path TEXT
+      );
+      CREATE TABLE IF NOT EXISTS consumers (
+        consumer_id TEXT PRIMARY KEY,
+        last_id INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_notifications_finished_at
+        ON notifications(finished_at);
+    `)
+    return db
+  } catch (err) {
+    console.error(
+      "[scheduler-ext] getDb failed:",
+      err instanceof Error ? err.message : String(err),
+    )
+    return null
+  }
+}
+
+function ingestJsonlToDb(db: Database): number {
   let content: string
   try {
     content = readFileSync(NOTIFICATIONS_PATH, "utf-8")
   } catch {
-    return
+    return 0
   }
+  const cursor = notificationsCursor ?? loadNotificationsCursor()
+  if (notificationsCursor === null) notificationsCursor = cursor
   const lines = content.split("\n").filter((l) => l.length > 0)
-  if (lines.length <= notificationsCursor) return
-  const newLines = lines.slice(notificationsCursor)
-  notificationsCursor = lines.length
-  saveNotificationsCursor(lines.length)
-  const records: RunRecord[] = []
-  for (const line of newLines) {
-    try {
-      const p = JSON.parse(line)
-      records.push({
-        scopeId: p.scopeId,
-        slug: p.slug,
-        runId: p.runId,
-        status: p.status,
-        exitCode: p.exitCode,
-        finishedAt: p.finishedAt,
-        durationMs: p.durationMs,
-        logPath: p.logPath,
-        startedAt: p.finishedAt,
-        prompt: "",
-        source: "scheduler-ext",
-      } as RunRecord)
-    } catch {
-      continue
+  if (lines.length <= cursor) return 0
+  const newLines = lines.slice(cursor)
+  const insert = db.prepare(
+    `INSERT OR IGNORE INTO notifications
+       (timestamp, scope_id, slug, run_id, status, exit_code,
+        finished_at, duration_ms, log_path)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  )
+  let inserted = 0
+  const tx = db.transaction(() => {
+    for (const line of newLines) {
+      try {
+        const p = JSON.parse(line)
+        const result = insert.run(
+          p.timestamp ?? new Date().toISOString(),
+          p.scopeId,
+          p.slug,
+          p.runId,
+          p.status,
+          p.exitCode ?? null,
+          p.finishedAt,
+          p.durationMs ?? null,
+          p.logPath ?? null,
+        )
+        if (result.changes > 0) inserted++
+      } catch {}
     }
-  }
-  if (records.length === 0) return
-  const summary = formatBatchSummary(records)
+  })
   try {
-    await withTimeout(
-      pluginClient.tui.appendPrompt({ text: summary }),
-      PLUGIN_CLIENT_TIMEOUT_MS,
-      "pollNotificationsFile.appendPrompt",
-    )
+    tx()
   } catch (err) {
     console.error(
-      "[scheduler-ext] pollNotificationsFile.appendPrompt failed:",
+      "[scheduler-ext] ingestJsonlToDb tx failed:",
       err instanceof Error ? err.message : String(err),
     )
+    return 0
+  }
+  notificationsCursor = lines.length
+  saveNotificationsCursor(lines.length)
+  return inserted
+}
+
+async function pollNotificationsDb(consumerId: string): Promise<void> {
+  if (!pluginClient) return
+  const db = getDb()
+  if (!db) return
+  try {
+    ingestJsonlToDb(db)
+    const row = db
+      .prepare(`SELECT last_id FROM consumers WHERE consumer_id = ?`)
+      .get(consumerId) as { last_id: number } | null
+    const lastId = row?.last_id ?? 0
+    const records = db
+      .prepare(
+        `SELECT id, timestamp, scope_id AS scopeId, slug, run_id AS runId,
+                status, exit_code AS exitCode, finished_at AS finishedAt,
+                duration_ms AS durationMs, log_path AS logPath
+         FROM notifications
+         WHERE id > ?
+         ORDER BY id
+         LIMIT 100`,
+      )
+      .all(lastId) as Array<RunRecord & { id: number }>
+    if (records.length === 0) return
+    const summary = formatBatchSummary(records)
+    try {
+      await withTimeout(
+        pluginClient.tui.appendPrompt({ text: summary }),
+        PLUGIN_CLIENT_TIMEOUT_MS,
+        "pollNotificationsDb.appendPrompt",
+      )
+    } catch (err) {
+      console.error(
+        "[scheduler-ext] pollNotificationsDb.appendPrompt failed:",
+        err instanceof Error ? err.message : String(err),
+      )
+      return
+    }
+    const maxId = records[records.length - 1].id
+    db.prepare(
+      `INSERT INTO consumers (consumer_id, last_id, updated_at)
+       VALUES (?, ?, ?)
+       ON CONFLICT(consumer_id) DO UPDATE SET
+         last_id = excluded.last_id,
+         updated_at = excluded.updated_at`,
+    ).run(consumerId, maxId, new Date().toISOString())
+  } finally {
+    try {
+      db.close()
+    } catch {}
   }
 }
 
@@ -2973,6 +3083,7 @@ async function autoNotifyOnResume(config?: SchedulerConfig): Promise<void> {
 
 function startBackgroundPoll(intervalSec: number): void {
   if (pollTimer || intervalSec <= 0) return
+  const consumerId = getConsumerId()
   pollTimer = setInterval(() => {
     void notifyCompletedRuns().catch((err) => {
       console.error(
@@ -2980,9 +3091,9 @@ function startBackgroundPoll(intervalSec: number): void {
         err instanceof Error ? err.stack || err.message : String(err),
       )
     })
-    void pollNotificationsFile().catch((err) => {
+    void pollNotificationsDb(consumerId).catch((err) => {
       console.error(
-        "[scheduler-ext] notifications-file poll tick rejected:",
+        "[scheduler-ext] notifications-db poll tick rejected:",
         err instanceof Error ? err.stack || err.message : String(err),
       )
     })
