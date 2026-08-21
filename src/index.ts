@@ -2344,6 +2344,35 @@ let lastNotifiedAt: string | null = null
 let pollTimer: ReturnType<typeof setInterval> | null = null
 let notifyInFlight: boolean = false
 
+// Timeout safety net: pluginClient.* calls can hang indefinitely when the CLI runs as a non-root user unable to authenticate against the opencode-server — without this the CLI never exits.
+const PLUGIN_CLIENT_TIMEOUT_MS = 5000
+// Top-level cap so a chain of hung pluginClient calls doesn't add up; aborts the whole notification cycle after this many ms.
+const PLUGIN_CLIENT_TOTAL_TIMEOUT_MS = 7000
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null
+  const timeout = new Promise<T>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`[scheduler-ext] ${label} timed out after ${ms}ms`)), ms)
+  })
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) clearTimeout(timer)
+  })
+}
+
+const CLI_SUBCOMMANDS = new Set([
+  "mcp", "models", "model", "session", "sessions", "config", "stats",
+  "auth", "generate", "run", "init", "version", "help",
+  "logout", "login", "doctor", "tool", "web", "serve",
+])
+
+function isCliMode(): boolean {
+  const args = process.argv.slice(2)
+  if (args.length === 0) return false
+  const first = args[0]
+  if (first.startsWith("-")) return true
+  return CLI_SUBCOMMANDS.has(first)
+}
+
 function loadLastNotified(): string | null {
   try {
     if (!existsSync(LAST_NOTIFIED_PATH)) return null
@@ -2459,12 +2488,16 @@ async function emitCompletionToast(run: RunRecord): Promise<void> {
   const durationSec = ((run.durationMs ?? 0) / 1000).toFixed(1)
   const errDetail = run.error ?? `exit ${run.exitCode ?? "?"}`
   try {
-    await pluginClient.tui.showToast({
-      title: `${ok ? "[OK]" : "[FAIL]"} ${slug} finished`,
-      message: ok ? `Exit 0 in ${durationSec}s` : `Failed: ${errDetail}`,
-      variant: ok ? "success" : "error",
-      duration: 5000,
-    })
+    await withTimeout(
+      pluginClient.tui.showToast({
+        title: `${ok ? "[OK]" : "[FAIL]"} ${slug} finished`,
+        message: ok ? `Exit 0 in ${durationSec}s` : `Failed: ${errDetail}`,
+        variant: ok ? "success" : "error",
+        duration: 5000,
+      }),
+      PLUGIN_CLIENT_TIMEOUT_MS,
+      "emitCompletionToast.showToast",
+    )
   } catch {
     // TUI may be closed; silent
   }
@@ -2491,12 +2524,16 @@ async function emitBatchToast(records: RunRecord[]): Promise<void> {
     message = `${successCount} ok, ${failCount} failed`
   }
   try {
-    await pluginClient.tui.showToast({
-      title,
-      message,
-      variant,
-      duration: 5000,
-    })
+    await withTimeout(
+      pluginClient.tui.showToast({
+        title,
+        message,
+        variant,
+        duration: 5000,
+      }),
+      PLUGIN_CLIENT_TIMEOUT_MS,
+      "emitBatchToast.showToast",
+    )
   } catch (err) {
     console.error(
       "[scheduler-ext] emitBatchToast.showToast failed:",
@@ -2509,7 +2546,11 @@ async function injectCompletionIntoPrompt(run: RunRecord): Promise<void> {
   if (!pluginClient) return
   const summary = formatRunSummary(run)
   try {
-    await pluginClient.tui.appendPrompt({ text: summary })
+    await withTimeout(
+      pluginClient.tui.appendPrompt({ text: summary }),
+      PLUGIN_CLIENT_TIMEOUT_MS,
+      "injectCompletionIntoPrompt.appendPrompt",
+    )
   } catch (err) {
     console.error(
       "[scheduler-ext] injectCompletionIntoPrompt.appendPrompt failed:",
@@ -2527,7 +2568,11 @@ async function injectBatchIntoPrompt(records: RunRecord[]): Promise<void> {
     "records -> current TUI",
   )
   try {
-    await pluginClient.tui.appendPrompt({ text: summary })
+    await withTimeout(
+      pluginClient.tui.appendPrompt({ text: summary }),
+      PLUGIN_CLIENT_TIMEOUT_MS,
+      "injectBatchIntoPrompt.appendPrompt",
+    )
   } catch (err) {
     console.error(
       "[scheduler-ext] injectBatchIntoPrompt.appendPrompt failed:",
@@ -2614,10 +2659,14 @@ async function injectBatchIntoSession(sessionId: string, records: RunRecord[]): 
     // on subsequent session.messages loads, returning "Unexpected server error" (Di)
     // and crashing the TUI. Trade-off: AI now responds in the target session even on
     // background poll (acceptable — user is not viewing that session at the moment).
-    await pluginClient.session.prompt({
-      path: { id: sessionId },
-      body: { parts: [{ type: "text", text: summary }] },
-    })
+    await withTimeout(
+      pluginClient.session.prompt({
+        path: { id: sessionId },
+        body: { parts: [{ type: "text", text: summary }] },
+      }),
+      PLUGIN_CLIENT_TIMEOUT_MS,
+      "injectBatchIntoSession.session.prompt",
+    )
   } catch (err) {
     console.error(
       "[scheduler-ext] injectBatchIntoSession failed for",
@@ -2630,17 +2679,21 @@ async function injectBatchIntoSession(sessionId: string, records: RunRecord[]): 
 async function triggerAgentOnSession(sessionId: string): Promise<void> {
   if (!pluginClient) return
   try {
-    await pluginClient.session.prompt({
-      path: { id: sessionId },
-      body: {
-        parts: [
-          {
-            type: "text",
-            text: "[scheduler-ext] Process the completed jobs in the previous summary. Report outcomes, flag failures, suggest next steps. Do not modify jobs unless asked.",
-          },
-        ],
-      },
-    })
+    await withTimeout(
+      pluginClient.session.prompt({
+        path: { id: sessionId },
+        body: {
+          parts: [
+            {
+              type: "text",
+              text: "[scheduler-ext] Process the completed jobs in the previous summary. Report outcomes, flag failures, suggest next steps. Do not modify jobs unless asked.",
+            },
+          ],
+        },
+      }),
+      PLUGIN_CLIENT_TIMEOUT_MS,
+      "triggerAgentOnSession.session.prompt",
+    )
   } catch (err) {
     console.error(
       "[scheduler-ext] triggerAgentOnSession failed for",
@@ -2653,35 +2706,42 @@ async function triggerAgentOnSession(sessionId: string): Promise<void> {
 export async function notifyCompletedRuns(): Promise<void> {
   if (notifyInFlight) return
   if (!pluginClient) return
+  if (isCliMode()) return
 
   notifyInFlight = true
   try {
-    const cfg = loadSchedulerConfig()
-    const additionalRoots = cfg.additionalSchedulerDirs ?? []
-    const { fresh, maxFinishedAt } = collectFreshRuns(additionalRoots)
-    if (fresh.length === 0 || !maxFinishedAt) return
+    await withTimeout(
+      (async () => {
+        const cfg = loadSchedulerConfig()
+        const additionalRoots = cfg.additionalSchedulerDirs ?? []
+        const { fresh, maxFinishedAt } = collectFreshRuns(additionalRoots)
+        if (fresh.length === 0 || !maxFinishedAt) return
 
-    fresh.sort((a, b) => (a.finishedAt! < b.finishedAt! ? -1 : 1))
+        fresh.sort((a, b) => (a.finishedAt! < b.finishedAt! ? -1 : 1))
 
-    await emitBatchToast(fresh)
+        await emitBatchToast(fresh)
 
-    const bySession = groupFreshBySession(fresh, additionalRoots)
-    const currentSessionRecords: RunRecord[] = []
+        const bySession = groupFreshBySession(fresh, additionalRoots)
+        const currentSessionRecords: RunRecord[] = []
 
-    for (const [sid, records] of bySession) {
-      if (!sid || sid === lastChatSessionId) {
-        currentSessionRecords.push(...records)
-      } else {
-        await injectBatchIntoSession(sid, records)
-      }
-    }
+        for (const [sid, records] of bySession) {
+          if (!sid || sid === lastChatSessionId) {
+            currentSessionRecords.push(...records)
+          } else {
+            await injectBatchIntoSession(sid, records)
+          }
+        }
 
-    if (currentSessionRecords.length > 0) {
-      await injectBatchIntoPrompt(currentSessionRecords)
-    }
+        if (currentSessionRecords.length > 0) {
+          await injectBatchIntoPrompt(currentSessionRecords)
+        }
 
-    lastNotifiedAt = maxFinishedAt
-    saveLastNotified(maxFinishedAt)
+        lastNotifiedAt = maxFinishedAt
+        saveLastNotified(maxFinishedAt)
+      })(),
+      PLUGIN_CLIENT_TOTAL_TIMEOUT_MS,
+      "notifyCompletedRuns.total",
+    )
   } catch (err) {
     console.error(
       "[scheduler-ext] notifyCompletedRuns internal error:",
@@ -2694,32 +2754,39 @@ export async function notifyCompletedRuns(): Promise<void> {
 
 async function autoNotifyOnResume(config?: SchedulerConfig): Promise<void> {
   if (!pluginClient) return
+  if (isCliMode()) return
 
   const cfg = config ?? loadSchedulerConfig()
   const mode = cfg.autoNotify?.mode ?? "active"
   if (mode === "off") return
 
   try {
-    const additionalRoots = cfg.additionalSchedulerDirs ?? []
-    const { fresh, maxFinishedAt } = collectFreshRuns(additionalRoots)
-    if (fresh.length === 0 || !maxFinishedAt) return
+    await withTimeout(
+      (async () => {
+        const additionalRoots = cfg.additionalSchedulerDirs ?? []
+        const { fresh, maxFinishedAt } = collectFreshRuns(additionalRoots)
+        if (fresh.length === 0 || !maxFinishedAt) return
 
-    fresh.sort((a, b) => (a.finishedAt! < b.finishedAt! ? -1 : 1))
+        fresh.sort((a, b) => (a.finishedAt! < b.finishedAt! ? -1 : 1))
 
-    await emitBatchToast(fresh)
+        await emitBatchToast(fresh)
 
-    const bySession = groupFreshBySession(fresh, additionalRoots)
+        const bySession = groupFreshBySession(fresh, additionalRoots)
 
-    for (const [sid, records] of bySession) {
-      if (!sid) continue
-      await injectBatchIntoSession(sid, records)
-      if (mode === "active") {
-        await triggerAgentOnSession(sid)
-      }
-    }
+        for (const [sid, records] of bySession) {
+          if (!sid) continue
+          await injectBatchIntoSession(sid, records)
+          if (mode === "active") {
+            await triggerAgentOnSession(sid)
+          }
+        }
 
-    lastNotifiedAt = maxFinishedAt
-    saveLastNotified(maxFinishedAt)
+        lastNotifiedAt = maxFinishedAt
+        saveLastNotified(maxFinishedAt)
+      })(),
+      PLUGIN_CLIENT_TOTAL_TIMEOUT_MS,
+      "autoNotifyOnResume.total",
+    )
   } catch (err) {
     console.error(
       "[scheduler-ext] autoNotifyOnResume internal error:",
@@ -2738,6 +2805,8 @@ function startBackgroundPoll(intervalSec: number): void {
       )
     })
   }, intervalSec * 1000)
+  // Required: unref() so opencode CLI commands (`mcp list` etc.) can exit; without it the interval keeps Node alive.
+  pollTimer.unref()
 }
 
 function stopBackgroundPoll(): void {
@@ -3012,13 +3081,20 @@ export const SchedulerPlugin: Plugin = async (input) => {
   )
   // Defer to next macrotask: entry Promise must resolve before any of our
   // server-bound or timer work starts (critical under server overload).
+  // Additionally, gate autoNotifyOnResume behind a 3s delay so that one-shot
+  // CLI commands (`opencode mcp list`, etc.) — which don't have an active
+  // session to inject into — exit cleanly without waiting for our HTTP work.
+  // TUI sessions stay alive past 3s, so the call still fires there.
   setImmediate(() => {
-    void autoNotifyOnResume(config).catch((err) => {
-      console.error(
-        "[scheduler-ext] autoNotifyOnResume rejected at plugin entry:",
-        err instanceof Error ? err.stack || err.message : String(err),
-      )
-    })
+    if (isCliMode()) return
+    setTimeout(() => {
+      void autoNotifyOnResume(config).catch((err) => {
+        console.error(
+          "[scheduler-ext] autoNotifyOnResume rejected at plugin entry:",
+          err instanceof Error ? err.stack || err.message : String(err),
+        )
+      })
+    }, 3000)
     startBackgroundPoll(config.autoNotify?.pollIntervalSec ?? 30)
   })
   return {

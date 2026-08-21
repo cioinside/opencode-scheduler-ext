@@ -14157,6 +14157,48 @@ var lastToolSessionId = null;
 var lastNotifiedAt = null;
 var pollTimer = null;
 var notifyInFlight = false;
+var PLUGIN_CLIENT_TIMEOUT_MS = 5000;
+var PLUGIN_CLIENT_TOTAL_TIMEOUT_MS = 7000;
+function withTimeout(promise2, ms, label) {
+  let timer = null;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`[scheduler-ext] ${label} timed out after ${ms}ms`)), ms);
+  });
+  return Promise.race([promise2, timeout]).finally(() => {
+    if (timer)
+      clearTimeout(timer);
+  });
+}
+var CLI_SUBCOMMANDS = new Set([
+  "mcp",
+  "models",
+  "model",
+  "session",
+  "sessions",
+  "config",
+  "stats",
+  "auth",
+  "generate",
+  "run",
+  "init",
+  "version",
+  "help",
+  "logout",
+  "login",
+  "doctor",
+  "tool",
+  "web",
+  "serve"
+]);
+function isCliMode() {
+  const args = process.argv.slice(2);
+  if (args.length === 0)
+    return false;
+  const first = args[0];
+  if (first.startsWith("-"))
+    return true;
+  return CLI_SUBCOMMANDS.has(first);
+}
 function loadLastNotified() {
   try {
     if (!existsSync(LAST_NOTIFIED_PATH))
@@ -14256,12 +14298,12 @@ async function emitCompletionToast(run) {
   const durationSec = ((run.durationMs ?? 0) / 1000).toFixed(1);
   const errDetail = run.error ?? `exit ${run.exitCode ?? "?"}`;
   try {
-    await pluginClient.tui.showToast({
+    await withTimeout(pluginClient.tui.showToast({
       title: `${ok ? "[OK]" : "[FAIL]"} ${slug} finished`,
       message: ok ? `Exit 0 in ${durationSec}s` : `Failed: ${errDetail}`,
       variant: ok ? "success" : "error",
       duration: 5000
-    });
+    }), PLUGIN_CLIENT_TIMEOUT_MS, "emitCompletionToast.showToast");
   } catch {}
 }
 async function emitBatchToast(records) {
@@ -14286,12 +14328,12 @@ async function emitBatchToast(records) {
     message = `${successCount} ok, ${failCount} failed`;
   }
   try {
-    await pluginClient.tui.showToast({
+    await withTimeout(pluginClient.tui.showToast({
       title,
       message,
       variant,
       duration: 5000
-    });
+    }), PLUGIN_CLIENT_TIMEOUT_MS, "emitBatchToast.showToast");
   } catch (err) {
     console.error("[scheduler-ext] emitBatchToast.showToast failed:", err instanceof Error ? err.message : String(err));
   }
@@ -14302,7 +14344,7 @@ async function injectBatchIntoPrompt(records) {
   const summary = formatBatchSummary(records);
   console.error("[scheduler-ext] injectBatchIntoPrompt:", records.length, "records -> current TUI");
   try {
-    await pluginClient.tui.appendPrompt({ text: summary });
+    await withTimeout(pluginClient.tui.appendPrompt({ text: summary }), PLUGIN_CLIENT_TIMEOUT_MS, "injectBatchIntoPrompt.appendPrompt");
   } catch (err) {
     console.error("[scheduler-ext] injectBatchIntoPrompt.appendPrompt failed:", err instanceof Error ? err.message : String(err));
   }
@@ -14376,10 +14418,10 @@ async function injectBatchIntoSession(sessionId, records) {
     return;
   const summary = formatBatchSummary(records);
   try {
-    await pluginClient.session.prompt({
+    await withTimeout(pluginClient.session.prompt({
       path: { id: sessionId },
       body: { parts: [{ type: "text", text: summary }] }
-    });
+    }), PLUGIN_CLIENT_TIMEOUT_MS, "injectBatchIntoSession.session.prompt");
   } catch (err) {
     console.error("[scheduler-ext] injectBatchIntoSession failed for", sessionId, err instanceof Error ? err.message : String(err));
   }
@@ -14388,7 +14430,7 @@ async function triggerAgentOnSession(sessionId) {
   if (!pluginClient)
     return;
   try {
-    await pluginClient.session.prompt({
+    await withTimeout(pluginClient.session.prompt({
       path: { id: sessionId },
       body: {
         parts: [
@@ -14398,7 +14440,7 @@ async function triggerAgentOnSession(sessionId) {
           }
         ]
       }
-    });
+    }), PLUGIN_CLIENT_TIMEOUT_MS, "triggerAgentOnSession.session.prompt");
   } catch (err) {
     console.error("[scheduler-ext] triggerAgentOnSession failed for", sessionId, err instanceof Error ? err.message : String(err));
   }
@@ -14408,29 +14450,33 @@ async function notifyCompletedRuns() {
     return;
   if (!pluginClient)
     return;
+  if (isCliMode())
+    return;
   notifyInFlight = true;
   try {
-    const cfg = loadSchedulerConfig();
-    const additionalRoots = cfg.additionalSchedulerDirs ?? [];
-    const { fresh, maxFinishedAt } = collectFreshRuns(additionalRoots);
-    if (fresh.length === 0 || !maxFinishedAt)
-      return;
-    fresh.sort((a, b) => a.finishedAt < b.finishedAt ? -1 : 1);
-    await emitBatchToast(fresh);
-    const bySession = groupFreshBySession(fresh, additionalRoots);
-    const currentSessionRecords = [];
-    for (const [sid, records] of bySession) {
-      if (!sid || sid === lastChatSessionId) {
-        currentSessionRecords.push(...records);
-      } else {
-        await injectBatchIntoSession(sid, records);
+    await withTimeout((async () => {
+      const cfg = loadSchedulerConfig();
+      const additionalRoots = cfg.additionalSchedulerDirs ?? [];
+      const { fresh, maxFinishedAt } = collectFreshRuns(additionalRoots);
+      if (fresh.length === 0 || !maxFinishedAt)
+        return;
+      fresh.sort((a, b) => a.finishedAt < b.finishedAt ? -1 : 1);
+      await emitBatchToast(fresh);
+      const bySession = groupFreshBySession(fresh, additionalRoots);
+      const currentSessionRecords = [];
+      for (const [sid, records] of bySession) {
+        if (!sid || sid === lastChatSessionId) {
+          currentSessionRecords.push(...records);
+        } else {
+          await injectBatchIntoSession(sid, records);
+        }
       }
-    }
-    if (currentSessionRecords.length > 0) {
-      await injectBatchIntoPrompt(currentSessionRecords);
-    }
-    lastNotifiedAt = maxFinishedAt;
-    saveLastNotified(maxFinishedAt);
+      if (currentSessionRecords.length > 0) {
+        await injectBatchIntoPrompt(currentSessionRecords);
+      }
+      lastNotifiedAt = maxFinishedAt;
+      saveLastNotified(maxFinishedAt);
+    })(), PLUGIN_CLIENT_TOTAL_TIMEOUT_MS, "notifyCompletedRuns.total");
   } catch (err) {
     console.error("[scheduler-ext] notifyCompletedRuns internal error:", err instanceof Error ? err.stack || err.message : String(err));
   } finally {
@@ -14440,28 +14486,32 @@ async function notifyCompletedRuns() {
 async function autoNotifyOnResume(config2) {
   if (!pluginClient)
     return;
+  if (isCliMode())
+    return;
   const cfg = config2 ?? loadSchedulerConfig();
   const mode = cfg.autoNotify?.mode ?? "active";
   if (mode === "off")
     return;
   try {
-    const additionalRoots = cfg.additionalSchedulerDirs ?? [];
-    const { fresh, maxFinishedAt } = collectFreshRuns(additionalRoots);
-    if (fresh.length === 0 || !maxFinishedAt)
-      return;
-    fresh.sort((a, b) => a.finishedAt < b.finishedAt ? -1 : 1);
-    await emitBatchToast(fresh);
-    const bySession = groupFreshBySession(fresh, additionalRoots);
-    for (const [sid, records] of bySession) {
-      if (!sid)
-        continue;
-      await injectBatchIntoSession(sid, records);
-      if (mode === "active") {
-        await triggerAgentOnSession(sid);
+    await withTimeout((async () => {
+      const additionalRoots = cfg.additionalSchedulerDirs ?? [];
+      const { fresh, maxFinishedAt } = collectFreshRuns(additionalRoots);
+      if (fresh.length === 0 || !maxFinishedAt)
+        return;
+      fresh.sort((a, b) => a.finishedAt < b.finishedAt ? -1 : 1);
+      await emitBatchToast(fresh);
+      const bySession = groupFreshBySession(fresh, additionalRoots);
+      for (const [sid, records] of bySession) {
+        if (!sid)
+          continue;
+        await injectBatchIntoSession(sid, records);
+        if (mode === "active") {
+          await triggerAgentOnSession(sid);
+        }
       }
-    }
-    lastNotifiedAt = maxFinishedAt;
-    saveLastNotified(maxFinishedAt);
+      lastNotifiedAt = maxFinishedAt;
+      saveLastNotified(maxFinishedAt);
+    })(), PLUGIN_CLIENT_TOTAL_TIMEOUT_MS, "autoNotifyOnResume.total");
   } catch (err) {
     console.error("[scheduler-ext] autoNotifyOnResume internal error:", err instanceof Error ? err.stack || err.message : String(err));
   }
@@ -14474,6 +14524,7 @@ function startBackgroundPoll(intervalSec) {
       console.error("[scheduler-ext] background poll tick rejected:", err instanceof Error ? err.stack || err.message : String(err));
     });
   }, intervalSec * 1000);
+  pollTimer.unref();
 }
 function runJobNow(job) {
   ensureDir(LOGS_DIR);
@@ -14710,9 +14761,13 @@ var SchedulerPlugin = async (input) => {
   const config2 = loadSchedulerConfig();
   console.error(`[scheduler-ext] plugin loaded, lastNotifiedAt=${lastNotifiedAt} pollIntervalSec=${config2.autoNotify?.pollIntervalSec ?? 30}`);
   setImmediate(() => {
-    autoNotifyOnResume(config2).catch((err) => {
-      console.error("[scheduler-ext] autoNotifyOnResume rejected at plugin entry:", err instanceof Error ? err.stack || err.message : String(err));
-    });
+    if (isCliMode())
+      return;
+    setTimeout(() => {
+      autoNotifyOnResume(config2).catch((err) => {
+        console.error("[scheduler-ext] autoNotifyOnResume rejected at plugin entry:", err instanceof Error ? err.stack || err.message : String(err));
+      });
+    }, 3000);
     startBackgroundPoll(config2.autoNotify?.pollIntervalSec ?? 30);
   });
   return {
@@ -15352,4 +15407,4 @@ export {
   slugify
 };
 
-//# debugId=FCCA3E820961DC4564756E2164756E21
+//# debugId=826384F7EC8A256964756E2164756E21

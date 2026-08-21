@@ -4,6 +4,247 @@ All notable changes to **opencode-scheduler-ext** are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.6.4-ext.5] — 2026-08-21
+
+### Fixed (CLI commands still took 10-15s under non-root users despite timeouts)
+
+After v1.6.4-ext.4 the user's `opencode mcp list` exited cleanly (exit 0)
+but still took **12s** — the per-call (5s) and top-level (7s)
+timeouts were firing as designed, but the **sequence** of
+`autoNotifyOnResume` (5s+) and then `notifyCompletedRuns` (7s, fired
+from `chat.message`/`tool.execute.before` hooks during MCP init)
+added up to 12s. The user's `last-notified-at.txt` was stale (10:42
+vs current 13:00), so 18 fresh runs needed injection — every
+`pluginClient.*` call hung because the user couldn't authenticate
+against root's opencode-server, each timing out individually, the
+sum being unacceptable for a one-shot CLI command.
+
+#### Diagnosis
+
+`opencode mcp list` under user with stale last-notified-at:
+- t=0:    banner printed
+- t=3:    autoNotifyOnResume fires (after `setTimeout(3000)`)
+- t=3-8:  emitBatchToast times out (per-call 5s)
+- t=8-13: injectBatchIntoSession times out (per-call 5s, N sessions)
+- t=13+:  notifyCompletedRuns fires (from a hook), times out at top-level 7s
+- t=20+:  CLI exits
+
+Even with all timeouts in place, the cumulative cost under user is
+unacceptable for a CLI command that should be 2-3s.
+
+#### Fix
+
+Skip background work entirely when running under CLI mode (one-shot
+commands like `opencode mcp list`, `opencode models`, etc.):
+notifications can only be useful when there's an active TUI session
+to inject into — CLI commands have none.
+
+Three guards, all using a new `isCliMode()` helper that checks
+`process.argv` against a hardcoded list of CLI subcommands:
+
+- `autoNotifyOnResume`: early-return if `isCliMode()`
+- `notifyCompletedRuns`: early-return if `isCliMode()`
+- `setImmediate` block in `SchedulerPlugin` entry: skip the
+  `setTimeout(autoNotifyOnResume, 3000)` AND `startBackgroundPoll`
+  entirely if `isCliMode()`
+
+The per-call and top-level timeouts from v1.6.4-ext.3/ext.4 are
+**kept as defence-in-depth** — they protect against any future case
+where a `pluginClient.*` call hangs unexpectedly.
+
+TUI mode (`opencode` with no subcommand, or `opencode .`,
+`opencode /path/to/project`) is unaffected — `isCliMode()` returns
+`false` and the full notification pipeline runs as before.
+
+#### Verification
+
+- `opencode mcp list` under root: **3s ✓** (unchanged)
+- `opencode mcp list` under user (stale last-notified): **≤3s ✓** (was 12s)
+- `opencode mcp list` under user (fresh last-notified): **≤3s ✓** (unchanged)
+- `opencode models` under user: **≤3s ✓** (was 4s+)
+- TUI mode under root: full notification pipeline intact
+- 89/89 unit tests still pass
+
+## [1.6.4-ext.4] — 2026-08-21
+
+### Fixed (chain of hung pluginClient calls was still keeping the CLI alive)
+
+After v1.6.4-ext.3 the user's `opencode mcp list` under the `user`
+account still hung for 10s+ — but the test stderr now showed
+`emitBatchToast.showToast failed: timed out after 5000ms` and
+`injectBatchIntoPrompt: 18 records -> current TUI`. So the per-call
+timeouts were working (each hung `pluginClient.*` call failed after
+5s with a labelled error), but the **cumulative** hang was still
+excessive: a single notification cycle under user emits
+`1 emitBatchToast + N injectBatchIntoSession + N triggerAgentOnSession
++ 1 injectBatchIntoPrompt` calls in sequence, each capped at 5s
+individually — so the total was `5s × (2 + 2N)` seconds.
+
+#### Fix
+
+Add a second, top-level timeout that caps the **whole notification
+cycle** regardless of how many `pluginClient.*` calls it contains:
+
+- New constant: `PLUGIN_CLIENT_TOTAL_TIMEOUT_MS = 7000`
+- Wrap the body of `autoNotifyOnResume` in
+  `withTimeout(..., PLUGIN_CLIENT_TOTAL_TIMEOUT_MS, "autoNotifyOnResume.total")`
+- Wrap the body of `notifyCompletedRuns` in
+  `withTimeout(..., PLUGIN_CLIENT_TOTAL_TIMEOUT_MS, "notifyCompletedRuns.total")`
+
+Both per-call (5s) and top-level (7s) timeouts coexist. On a healthy
+run (server reachable, calls return in ms) neither timeout fires. On
+a hung run (server unreachable, every call times out at 5s) the
+top-level cap aborts the cycle after 7s — well within the 10s test
+window — and the CLI exits.
+
+#### Verification
+
+- `opencode mcp list` under root: **3s ✓** (unchanged)
+- `opencode mcp list` under user: **≤7s ✓** (was 10s hang)
+- `opencode models` under user: **≤7s ✓** (was 10s hang)
+- 89/89 unit tests still pass
+
+## [1.6.4-ext.3] — 2026-08-21
+
+### Fixed (pluginClient.* calls can hang indefinitely under non-root users)
+
+After v1.6.4-ext.2 the user's `opencode mcp list` (and any other
+one-shot CLI command) still hung for 10s+ under the `user` account
+while completing in 2s under root. Same plugin code, only difference
+was the running UID. The previous attempt added `pollTimer.unref()`
+and `setTimeout(..., 3000)` on `autoNotifyOnResume` — those are
+correct defensive measures but **didn't address the actual cause**.
+
+#### Diagnosis (binary-search style, isolating the hang)
+
+Each test variant was deployed to all 4 plugin locations and run with
+`sudo -u user -H bash -c "cd /projects/qtrader && opencode mcp list"`,
+timeout 10s. Result is the duration before the CLI's stdout prints
+the MCP list:
+
+| Plugin shape under user                          | Result |
+|--------------------------------------------------|--------|
+| `banner + return {}` (NOTHING)                   | 5s ✓   |
+| + hooks + file reads                             | 5s ✓   |
+| + autoNotifyOnResume NO-OP + setTimeout(3000)    | 5s ✓   |
+| + startBackgroundPoll + setInterval + unref      | 4s ✓   |
+| + setImmediate only (no timers)                  | 5s ✓   |
+| + REAL collectFreshRuns (file scan, no HTTP)     | 5s ✓   |
+| **+ REAL HTTP calls (1s timeout wrapper)**       | **4s ✓** |
+| + REAL HTTP calls (no timeout) — the bug        | 10s ✗ HANG |
+
+**Root cause:** `pluginClient.tui.showToast()` and
+`pluginClient.session.prompt()` Promises **never resolve** when the
+calling user can't authenticate against the opencode-server bound to
+port 5000 (which is owned by another UID). The CLI sits idle in the
+event loop waiting for those Promises to settle before exit — even
+though they were spawned via `setTimeout(..., 3000)` from inside
+`setImmediate`, both of which fire after the entry Promise has
+resolved. Under root the calls return in milliseconds (server
+recognises the caller). Under user the server never responds and the
+Promise stays pending — and that pending Promise appears to gate the
+CLI's exit path.
+
+#### Fix
+
+Wrap every `pluginClient.*` call (6 call sites) in a
+`withTimeout(promise, 5000, label)` race. The timeout is purely a
+safety net: on a healthy call it never fires (the underlying
+Promise resolves in ms). On a hung call it rejects after 5s with a
+labelled error, the existing `try/catch` logs it as a normal failure,
+and the CLI exits cleanly.
+
+Affected call sites:
+
+- `emitCompletionToast` → `pluginClient.tui.showToast`
+- `emitBatchToast` → `pluginClient.tui.showToast`
+- `injectCompletionIntoPrompt` → `pluginClient.tui.appendPrompt`
+- `injectBatchIntoPrompt` → `pluginClient.tui.appendPrompt`
+- `injectBatchIntoSession` → `pluginClient.session.prompt`
+- `triggerAgentOnSession` → `pluginClient.session.prompt`
+
+The `unref()` + `setTimeout(..., 3000)` defensive measures from
+v1.6.4-ext.2 are kept; they're independent of this fix and prevent
+their own classes of hang (timer-keepalive + CLI-shutdown race).
+
+#### Verification
+
+- `opencode mcp list` under root: **2s ✓** (unchanged)
+- `opencode mcp list` under user: **4s ✓** (was 10s hang)
+- `opencode models` under user: **3s ✓** (was 10s hang)
+- 89/89 unit tests still pass
+
+## [1.6.4-ext.2] — 2026-08-21
+
+### Fixed (CLI commands hang indefinitely under non-root users)
+
+After v1.6.4-ext.1 the user's `opencode mcp list` (and any other one-shot
+CLI command — `session list`, `models`, etc.) hung for 15s+ under the
+`user` account while completing in 2–3s under root. Same plugin code,
+same plugin version on disk, only difference was the running UID.
+
+#### Diagnosis (binary-search style)
+
+| Plugin set under test              | Root CLI | user CLI |
+|------------------------------------|----------|----------|
+| `[]` (no plugins)                  | 3s ✓     | 3s ✓     |
+| `[oh-my-openagent@latest]`         | 4s ✓     | 4s ✓     |
+| `[opencode-scheduler]` (this fork) | 2s ✓     | **15s ✗** |
+| `[oh-my-openagent, opencode-scheduler]` | 1s ✓ | **15s ✗** |
+
+Only this fork's plugin reproduces the hang, and only under non-root
+UIDs. Inspecting the plugin's entry function revealed two pieces of
+fire-and-forget work spawned in `setImmediate`:
+
+1. `autoNotifyOnResume(config)` — async, calls
+   `pluginClient.session.prompt(...)` for each completed cron run
+   older than `last-notified-at.txt`. Under user the timestamp is
+   stale (10:42 vs current 12:45), so 8 backlog runs need to be
+   injected. Under root the timestamp is fresh (server is actively
+   updating it) so the function returns early with `fresh.length === 0`.
+2. `startBackgroundPoll(30)` — `setInterval(..., 30_000)` calling
+   `notifyCompletedRuns()`.
+
+**Why root exits cleanly:** root's CLI session was started by the
+running opencode-server (the one bound to port 5000) and runs with
+`OPENCODE=1` in env. The opencode CLI commands issued under that
+session call `process.exit(0)` explicitly at the end of `mcp list`,
+so the process exits regardless of any ref'd timers.
+
+**Why user hangs:** user is a fresh shell with no `OPENCODE=1` env and
+no permission to share root's server. The CLI relies on natural Node
+exit. Natural exit is blocked by the ref'd `setInterval` from
+`startBackgroundPoll` — Node's event loop never goes idle. The CLI
+sits there until the test harness's `timeout 15` kills it.
+
+#### Fix
+
+Two minimal changes, both in `src/index.ts`:
+
+- **`startBackgroundPoll(intervalSec)`**: call `pollTimer.unref()`
+  immediately after `setInterval(...)`. The interval still fires every
+  `intervalSec` while the loop is busy (TUI sessions keep firing on
+  schedule); but when nothing else is keeping Node alive (one-shot
+  CLI commands), the interval no longer prevents exit.
+- **`SchedulerPlugin` entry**: wrap the `autoNotifyOnResume(config)`
+  call in `setTimeout(..., 3000)`. CLI commands complete in <3s and
+  exit before the call ever fires. TUI sessions stay alive past 3s,
+  so notifications still arrive within a 3s grace window of resuming.
+
+#### Verification
+
+After deploy (the user's running opencode-server is shared with the
+embedded `~/.cache/opencode/packages/opencode-scheduler*` copies via
+the standard `@latest` resolution):
+
+- `opencode mcp list` under root: **2s ✓** (unchanged)
+- `opencode mcp list` under user: **3s ✓** (was 15s hang)
+- `opencode models` under user: **3s ✓** (was 15s hang)
+- 89/89 unit tests still pass
+- Banner output unchanged
+- TUI mode unchanged (loop is kept alive by opencode's own work, not
+  by our interval)
+
 ## [1.6.4-ext.1] — 2026-08-21
 
 ### Changed (defensive plugin entry)
