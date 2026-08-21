@@ -4,6 +4,48 @@ All notable changes to **opencode-scheduler-ext** are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.6.2-ext.1] — 2026-08-21
+
+### Added (cross-home multi-root scheduler)
+
+- **New config field**: `SchedulerConfig.additionalSchedulerDirs?: string[]`.
+  Lists extra `<scopes>/` roots to scan for run records in addition to
+  `homedir()/.config/opencode/scheduler/scopes`. Use this for cross-home
+  setups where one opencode TUI must also monitor jobs owned by a
+  different OS user (e.g. a root TUI monitoring jobs under `/home/user/`).
+
+- **Implementation**: `collectFreshRuns(additionalRoots?)`, `groupFreshBySession`
+  and `lookupSessionForJob` now iterate `[SCOPES_DIR, ...additionalRoots]`.
+  `lastNotifiedAt` watermark remains a single value per scheduler instance,
+  which means already-shown records are deduped across roots — overlapping
+  or duplicate roots are safe.
+
+- **Backward-compatible**: when `additionalSchedulerDirs` is unset (default)
+  behavior is identical to v1.6.1-ext.1.
+
+### Discovered (not a fork bug — multi-user host architecture)
+
+This release was triggered by a real production scenario:
+the host runs two opencode installations (`/root` and `/home/user`),
+each with its own `opencode-scheduler` package. The user was starting
+their TUI as the `user` user, where the upstream `opencode-scheduler`
+v1.3.0 had no auto-notification feature at all. After this release,
+the user's TUI can either:
+
+1. **Use v1.6.2-ext.1** (recommended) — its `homedir()` is
+   `/home/user`, so it natively finds the `scalper-cycle-monitor` job
+   without any config. The user restarts their user TUI and notifications
+   arrive.
+
+2. **Add `additionalSchedulerDirs` to root TUI's config** — root TUI
+   also monitors `/home/user/.config/opencode/scheduler/scopes`. Useful
+   if the user wants notifications visible in their root TUI as well.
+
+Tests: 77/77 pass (6 new in `test/plugin-entry.test.ts` Wave 8.2 block:
+SchedulerConfig field, collectFreshRuns multi-root, lookupSessionForJob
+multi-root, groupFreshBySession forwarding, notifyCompletedRuns threading,
+autoNotifyOnResume threading).
+
 ## [1.6.1-ext.1] — 2026-08-21
 
 ### Fixed (race protection for `notifyCompletedRuns`)

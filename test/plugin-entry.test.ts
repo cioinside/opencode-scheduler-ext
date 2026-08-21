@@ -331,7 +331,7 @@ describe("Wave 7: per-session routing helpers", () => {
 
   test("notifyCompletedRuns groups by session and routes per-session", () => {
     const body = functionBody(/export async function notifyCompletedRuns\([^)]*\)\s*:\s*Promise<void>\s*\{/)
-    expect(body).toMatch(/collectFreshRuns\(\)/)
+    expect(body).toMatch(/collectFreshRuns\(/)
     expect(body).toMatch(/groupFreshBySession\(/)
     expect(body).toMatch(/injectBatchIntoSession\(/)
     expect(body).toMatch(/lastChatSessionId/)
@@ -351,7 +351,7 @@ describe("Wave 7: autoNotifyOnResume + SchedulerPlugin wiring", () => {
 
   test("autoNotifyOnResume routes per-session + triggers model in active mode only", () => {
     const body = functionBody(/async function autoNotifyOnResume\([^)]*\)\s*:\s*Promise<void>\s*\{/)
-    expect(body).toMatch(/collectFreshRuns\(\)/)
+    expect(body).toMatch(/collectFreshRuns\(/)
     expect(body).toMatch(/groupFreshBySession\(/)
     expect(body).toMatch(/injectBatchIntoSession\(/)
     expect(body).toMatch(/triggerAgentOnSession\(/)
@@ -447,5 +447,47 @@ describe("Wave 8.1: in-flight flag prevents concurrent notifyCompletedRuns", () 
   test("notifyCompletedRuns still guards with pluginClient null-check", () => {
     const body = functionBody(/export async function notifyCompletedRuns\([^)]*\)\s*:\s*Promise<void>\s*\{/)
     expect(body).toMatch(/if\s*\(\s*!pluginClient\s*\)\s*return/)
+  })
+})
+
+describe("Wave 8.2: cross-home multi-root scheduler dirs", () => {
+  test("SchedulerConfig exposes additionalSchedulerDirs field", () => {
+    expect(SRC).toMatch(/type\s+SchedulerConfig\s*=\s*\{[\s\S]*?additionalSchedulerDirs\?:\s*string\[\][\s\S]*?\}/)
+  })
+
+  test("collectFreshRuns accepts additionalRoots parameter and iterates multiple roots", () => {
+    expect(SRC).toMatch(/function\s+collectFreshRuns\s*\(\s*additionalRoots:\s*string\[\]\s*=\s*\[\]\s*\)/)
+    const body = functionBody(/function\s+collectFreshRuns\s*\(\s*additionalRoots[^)]*\)\s*:/)
+    expect(body).toMatch(/const\s+roots\s*=\s*\[\s*SCOPES_DIR\s*,\s*\.\.\.additionalRoots/)
+    expect(body).toMatch(/for\s*\(\s*const\s+root\s+of\s+roots\s*\)/)
+    expect(body).toMatch(/join\s*\(\s*root\s*,\s*scopeId\s*,\s*"runs"\s*\)/)
+  })
+
+  test("lookupSessionForJob accepts additionalRoots parameter for cross-scope lookup", () => {
+    expect(SRC).toMatch(/function\s+lookupSessionForJob\s*\(\s*scopeId[^)]*?,\s*slug[^)]*?,\s*additionalRoots:\s*string\[\]\s*=\s*\[\]\s*\)/)
+    const body = functionBody(/function\s+lookupSessionForJob\s*\(\s*scopeId[^)]*?\)\s*:\s*string\s*\|\s*null\s*\{/)
+    expect(body).toMatch(/for\s*\(\s*const\s+root\s+of\s+roots\s*\)/)
+    expect(body).toMatch(/join\s*\(\s*root\s*,\s*scopeId\s*,\s*"jobs"/)
+  })
+
+  test("groupFreshBySession forwards additionalRoots to lookupSessionForJob", () => {
+    expect(SRC).toMatch(/function\s+groupFreshBySession\s*\(\s*records:\s*RunRecord\[\][^)]*?,\s*additionalRoots:\s*string\[\]\s*=\s*\[\]\s*\)/)
+    const body = functionBody(/function\s+groupFreshBySession\s*\([^)]*\)\s*:\s*Map<string\s*\|\s*null[\s\S]*?>\s*\{/)
+    expect(body).toMatch(/lookupSessionForJob\s*\(\s*r\.scopeId\s*,\s*r\.slug\s*,\s*additionalRoots\s*\)/)
+  })
+
+  test("notifyCompletedRuns loads config and threads additionalSchedulerDirs through collect + group", () => {
+    const body = functionBody(/export async function notifyCompletedRuns\([^)]*\)\s*:\s*Promise<void>\s*\{/)
+    expect(body).toMatch(/const\s+cfg\s*=\s*loadSchedulerConfig\(\)/)
+    expect(body).toMatch(/cfg\.additionalSchedulerDirs\s*\?\?\s*\[\]/)
+    expect(body).toMatch(/collectFreshRuns\s*\(\s*additionalRoots\s*\)/)
+    expect(body).toMatch(/groupFreshBySession\s*\(\s*fresh\s*,\s*additionalRoots\s*\)/)
+  })
+
+  test("autoNotifyOnResume also threads additionalSchedulerDirs through", () => {
+    const body = functionBody(/async function autoNotifyOnResume\([^)]*\)\s*:\s*Promise<void>\s*\{/)
+    expect(body).toMatch(/additionalRoots\s*=\s*cfg\.additionalSchedulerDirs\s*\?\?\s*\[\]/)
+    expect(body).toMatch(/collectFreshRuns\s*\(\s*additionalRoots\s*\)/)
+    expect(body).toMatch(/groupFreshBySession\s*\(\s*fresh\s*,\s*additionalRoots\s*\)/)
   })
 })

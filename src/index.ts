@@ -372,6 +372,7 @@ type SchedulerConfig = {
     mode?: "off" | "silent" | "active"
     pollIntervalSec?: number
   }
+  additionalSchedulerDirs?: string[]
 }
 
 interface JobRunSpec {
@@ -2403,17 +2404,25 @@ function initializeLastNotified(): string {
   return latest ?? new Date().toISOString()
 }
 
-function lookupSessionForJob(scopeId: string | undefined, slug: string | undefined): string | null {
+function lookupSessionForJob(
+  scopeId: string | undefined,
+  slug: string | undefined,
+  additionalRoots: string[] = []
+): string | null {
   if (!scopeId || !slug) return null
-  const path = join(SCOPES_DIR, scopeId, "jobs", `${slug}.json`)
-  try {
-    if (!existsSync(path)) return null
-    const raw = readFileSync(path, "utf-8")
-    const job = JSON.parse(raw) as Partial<Job>
-    return job.sessionId ?? null
-  } catch {
-    return null
+  const roots = [SCOPES_DIR, ...additionalRoots.filter((r) => r && r !== SCOPES_DIR)]
+  for (const root of roots) {
+    const path = join(root, scopeId, "jobs", `${slug}.json`)
+    try {
+      if (!existsSync(path)) continue
+      const raw = readFileSync(path, "utf-8")
+      const job = JSON.parse(raw) as Partial<Job>
+      return job.sessionId ?? null
+    } catch {
+      continue
+    }
   }
+  return null
 }
 
 function formatRunSummary(run: RunRecord): string {
@@ -2513,49 +2522,54 @@ async function injectBatchIntoPrompt(records: RunRecord[]): Promise<void> {
   }
 }
 
-function collectFreshRuns(): { fresh: RunRecord[]; maxFinishedAt: string | null } {
+type FreshRunsResult = { fresh: RunRecord[]; maxFinishedAt: string | null }
+
+function collectFreshRuns(additionalRoots: string[] = []): FreshRunsResult {
   const cutoff = lastNotifiedAt
   const fresh: RunRecord[] = []
   let maxFinishedAt: string | null = null
 
-  if (!existsSync(SCOPES_DIR)) return { fresh, maxFinishedAt }
+  const roots = [SCOPES_DIR, ...additionalRoots.filter((r) => r && r !== SCOPES_DIR)]
+  for (const root of roots) {
+    if (!existsSync(root)) continue
 
-  let scopes: string[]
-  try {
-    scopes = readdirSync(SCOPES_DIR)
-  } catch {
-    return { fresh, maxFinishedAt }
-  }
-
-  for (const scopeId of scopes) {
-    const scopeRunsDir = join(SCOPES_DIR, scopeId, "runs")
-    let files: string[]
+    let scopes: string[]
     try {
-      files = readdirSync(scopeRunsDir)
+      scopes = readdirSync(root)
     } catch {
       continue
     }
-    for (const file of files) {
-      if (!file.endsWith(".jsonl")) continue
-      const filePath = join(scopeRunsDir, file)
-      let content: string
+
+    for (const scopeId of scopes) {
+      const scopeRunsDir = join(root, scopeId, "runs")
+      let files: string[]
       try {
-        content = readFileSync(filePath, "utf-8")
+        files = readdirSync(scopeRunsDir)
       } catch {
         continue
       }
-      for (const line of content.split("\n").filter(Boolean)) {
-        let record: RunRecord
+      for (const file of files) {
+        if (!file.endsWith(".jsonl")) continue
+        const filePath = join(scopeRunsDir, file)
+        let content: string
         try {
-          record = JSON.parse(line) as RunRecord
+          content = readFileSync(filePath, "utf-8")
         } catch {
           continue
         }
-        if (!record.finishedAt || !record.runId) continue
-        if (cutoff && record.finishedAt <= cutoff) continue
-        fresh.push(record)
-        if (!maxFinishedAt || record.finishedAt > maxFinishedAt) {
-          maxFinishedAt = record.finishedAt
+        for (const line of content.split("\n").filter(Boolean)) {
+          let record: RunRecord
+          try {
+            record = JSON.parse(line) as RunRecord
+          } catch {
+            continue
+          }
+          if (!record.finishedAt || !record.runId) continue
+          if (cutoff && record.finishedAt <= cutoff) continue
+          fresh.push(record)
+          if (!maxFinishedAt || record.finishedAt > maxFinishedAt) {
+            maxFinishedAt = record.finishedAt
+          }
         }
       }
     }
@@ -2564,10 +2578,13 @@ function collectFreshRuns(): { fresh: RunRecord[]; maxFinishedAt: string | null 
   return { fresh, maxFinishedAt }
 }
 
-function groupFreshBySession(records: RunRecord[]): Map<string | null, RunRecord[]> {
+function groupFreshBySession(
+  records: RunRecord[],
+  additionalRoots: string[] = []
+): Map<string | null, RunRecord[]> {
   const map = new Map<string | null, RunRecord[]>()
   for (const r of records) {
-    const sid = lookupSessionForJob(r.scopeId, r.slug)
+    const sid = lookupSessionForJob(r.scopeId, r.slug, additionalRoots)
     const list = map.get(sid) ?? []
     list.push(r)
     map.set(sid, list)
@@ -2610,14 +2627,16 @@ export async function notifyCompletedRuns(): Promise<void> {
 
   notifyInFlight = true
   try {
-    const { fresh, maxFinishedAt } = collectFreshRuns()
+    const cfg = loadSchedulerConfig()
+    const additionalRoots = cfg.additionalSchedulerDirs ?? []
+    const { fresh, maxFinishedAt } = collectFreshRuns(additionalRoots)
     if (fresh.length === 0 || !maxFinishedAt) return
 
     fresh.sort((a, b) => (a.finishedAt! < b.finishedAt! ? -1 : 1))
 
     await emitBatchToast(fresh)
 
-    const bySession = groupFreshBySession(fresh)
+    const bySession = groupFreshBySession(fresh, additionalRoots)
     const currentSessionRecords: RunRecord[] = []
 
     for (const [sid, records] of bySession) {
@@ -2646,14 +2665,15 @@ async function autoNotifyOnResume(config?: SchedulerConfig): Promise<void> {
   const mode = cfg.autoNotify?.mode ?? "active"
   if (mode === "off") return
 
-  const { fresh, maxFinishedAt } = collectFreshRuns()
+  const additionalRoots = cfg.additionalSchedulerDirs ?? []
+  const { fresh, maxFinishedAt } = collectFreshRuns(additionalRoots)
   if (fresh.length === 0 || !maxFinishedAt) return
 
   fresh.sort((a, b) => (a.finishedAt! < b.finishedAt! ? -1 : 1))
 
   await emitBatchToast(fresh)
 
-  const bySession = groupFreshBySession(fresh)
+  const bySession = groupFreshBySession(fresh, additionalRoots)
 
   for (const [sid, records] of bySession) {
     if (!sid) continue

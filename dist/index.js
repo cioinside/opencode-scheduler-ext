@@ -14213,19 +14213,23 @@ function initializeLastNotified() {
   } catch {}
   return latest ?? new Date().toISOString();
 }
-function lookupSessionForJob(scopeId, slug) {
+function lookupSessionForJob(scopeId, slug, additionalRoots = []) {
   if (!scopeId || !slug)
     return null;
-  const path = join(SCOPES_DIR, scopeId, "jobs", `${slug}.json`);
-  try {
-    if (!existsSync(path))
-      return null;
-    const raw = readFileSync(path, "utf-8");
-    const job = JSON.parse(raw);
-    return job.sessionId ?? null;
-  } catch {
-    return null;
+  const roots = [SCOPES_DIR, ...additionalRoots.filter((r) => r && r !== SCOPES_DIR)];
+  for (const root of roots) {
+    const path = join(root, scopeId, "jobs", `${slug}.json`);
+    try {
+      if (!existsSync(path))
+        continue;
+      const raw = readFileSync(path, "utf-8");
+      const job = JSON.parse(raw);
+      return job.sessionId ?? null;
+    } catch {
+      continue;
+    }
   }
+  return null;
 }
 function formatBatchSummary(records) {
   const lines = [];
@@ -14298,61 +14302,64 @@ async function injectBatchIntoPrompt(records) {
     await pluginClient.tui.appendPrompt({ text: summary });
   } catch {}
 }
-function collectFreshRuns() {
+function collectFreshRuns(additionalRoots = []) {
   const cutoff = lastNotifiedAt;
   const fresh = [];
   let maxFinishedAt = null;
-  if (!existsSync(SCOPES_DIR))
-    return { fresh, maxFinishedAt };
-  let scopes;
-  try {
-    scopes = readdirSync(SCOPES_DIR);
-  } catch {
-    return { fresh, maxFinishedAt };
-  }
-  for (const scopeId of scopes) {
-    const scopeRunsDir2 = join(SCOPES_DIR, scopeId, "runs");
-    let files;
+  const roots = [SCOPES_DIR, ...additionalRoots.filter((r) => r && r !== SCOPES_DIR)];
+  for (const root of roots) {
+    if (!existsSync(root))
+      continue;
+    let scopes;
     try {
-      files = readdirSync(scopeRunsDir2);
+      scopes = readdirSync(root);
     } catch {
       continue;
     }
-    for (const file2 of files) {
-      if (!file2.endsWith(".jsonl"))
-        continue;
-      const filePath = join(scopeRunsDir2, file2);
-      let content;
+    for (const scopeId of scopes) {
+      const scopeRunsDir2 = join(root, scopeId, "runs");
+      let files;
       try {
-        content = readFileSync(filePath, "utf-8");
+        files = readdirSync(scopeRunsDir2);
       } catch {
         continue;
       }
-      for (const line of content.split(`
-`).filter(Boolean)) {
-        let record2;
+      for (const file2 of files) {
+        if (!file2.endsWith(".jsonl"))
+          continue;
+        const filePath = join(scopeRunsDir2, file2);
+        let content;
         try {
-          record2 = JSON.parse(line);
+          content = readFileSync(filePath, "utf-8");
         } catch {
           continue;
         }
-        if (!record2.finishedAt || !record2.runId)
-          continue;
-        if (cutoff && record2.finishedAt <= cutoff)
-          continue;
-        fresh.push(record2);
-        if (!maxFinishedAt || record2.finishedAt > maxFinishedAt) {
-          maxFinishedAt = record2.finishedAt;
+        for (const line of content.split(`
+`).filter(Boolean)) {
+          let record2;
+          try {
+            record2 = JSON.parse(line);
+          } catch {
+            continue;
+          }
+          if (!record2.finishedAt || !record2.runId)
+            continue;
+          if (cutoff && record2.finishedAt <= cutoff)
+            continue;
+          fresh.push(record2);
+          if (!maxFinishedAt || record2.finishedAt > maxFinishedAt) {
+            maxFinishedAt = record2.finishedAt;
+          }
         }
       }
     }
   }
   return { fresh, maxFinishedAt };
 }
-function groupFreshBySession(records) {
+function groupFreshBySession(records, additionalRoots = []) {
   const map2 = new Map;
   for (const r of records) {
-    const sid = lookupSessionForJob(r.scopeId, r.slug);
+    const sid = lookupSessionForJob(r.scopeId, r.slug, additionalRoots);
     const list = map2.get(sid) ?? [];
     list.push(r);
     map2.set(sid, list);
@@ -14393,12 +14400,14 @@ async function notifyCompletedRuns() {
     return;
   notifyInFlight = true;
   try {
-    const { fresh, maxFinishedAt } = collectFreshRuns();
+    const cfg = loadSchedulerConfig();
+    const additionalRoots = cfg.additionalSchedulerDirs ?? [];
+    const { fresh, maxFinishedAt } = collectFreshRuns(additionalRoots);
     if (fresh.length === 0 || !maxFinishedAt)
       return;
     fresh.sort((a, b) => a.finishedAt < b.finishedAt ? -1 : 1);
     await emitBatchToast(fresh);
-    const bySession = groupFreshBySession(fresh);
+    const bySession = groupFreshBySession(fresh, additionalRoots);
     const currentSessionRecords = [];
     for (const [sid, records] of bySession) {
       if (!sid || sid === lastChatSessionId) {
@@ -14423,12 +14432,13 @@ async function autoNotifyOnResume(config2) {
   const mode = cfg.autoNotify?.mode ?? "active";
   if (mode === "off")
     return;
-  const { fresh, maxFinishedAt } = collectFreshRuns();
+  const additionalRoots = cfg.additionalSchedulerDirs ?? [];
+  const { fresh, maxFinishedAt } = collectFreshRuns(additionalRoots);
   if (fresh.length === 0 || !maxFinishedAt)
     return;
   fresh.sort((a, b) => a.finishedAt < b.finishedAt ? -1 : 1);
   await emitBatchToast(fresh);
-  const bySession = groupFreshBySession(fresh);
+  const bySession = groupFreshBySession(fresh, additionalRoots);
   for (const [sid, records] of bySession) {
     if (!sid)
       continue;
@@ -15311,4 +15321,4 @@ export {
   slugify
 };
 
-//# debugId=1739B58884519EF164756E2164756E21
+//# debugId=D410D84A16B0AC3764756E2164756E21
