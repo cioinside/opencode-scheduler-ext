@@ -4,6 +4,41 @@ All notable changes to **opencode-scheduler-ext** are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.6.4-ext.11] — 2026-08-21
+
+### Fixed (defensive gate for stale job.sessionId under user-mode)
+
+The `lookupSessionForJob()` helper returned whatever `sessionId` was
+stored in `job.json`, even under user-mode where that value is irrelevant
+(notification routing uses `injectBatchIntoPrompt`, never `session.prompt`).
+When a TUI was restarted, opencode created a fresh internal session while
+visually continuing the previous conversation. The job's stored `sessionId`
+became a dead reference — and although the isUserMode gate in
+`autoNotifyOnResume` / `notifyCompletedRuns` correctly skipped the
+`session.prompt` call, the opencode-server still surfaced "Session not
+found" from internal session-id resolution during `injectBatchIntoPrompt`.
+
+Fix: explicit `if (isUserMode()) return null` at the top of
+`lookupSessionForJob()`. The gate is defensive (the callers already guard
+the same scenario) but eliminates the stale-id noise entirely.
+
+No restart required: the helper is invoked lazily on each notification
+cycle, so the next tick automatically picks up the fix.
+
+```ts
+function lookupSessionForJob(
+  scopeId: string | undefined,
+  slug: string | undefined,
+  additionalRoots: string[] = []
+): string | null {
+  if (!scopeId || !slug) return null
+  if (isUserMode()) return null   // ext.11: defensive gate
+  // ...
+}
+```
+
+Related: L11 lesson recorded in `experience-records/experience/opencode-scheduler-cross-home-multiroot/note-v10.md`.
+
 ## [1.6.4-ext.10] — 2026-08-21
 
 ### Fixed (cron-level flock gate — survives supervisor.pl regeneration)

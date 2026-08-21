@@ -2487,6 +2487,12 @@ function lookupSessionForJob(
   additionalRoots: string[] = []
 ): string | null {
   if (!scopeId || !slug) return null
+  // ext.11: defensive gate — under user-mode we never route notifications via
+  // session.prompt (always use injectBatchIntoPrompt). Stale sessionId from a
+  // previous TUI session is therefore irrelevant; ignore it explicitly so the
+  // opencode-server doesn't see a "Session not found" lookup during the
+  // autoNotifyOnResume flow.
+  if (isUserMode()) return null
   const roots = [SCOPES_DIR, ...additionalRoots.filter((r) => r && r !== SCOPES_DIR)]
   for (const root of roots) {
     const path = join(root, scopeId, "jobs", `${slug}.json`)

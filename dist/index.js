@@ -14305,6 +14305,8 @@ function initializeLastNotified() {
 function lookupSessionForJob(scopeId, slug, additionalRoots = []) {
   if (!scopeId || !slug)
     return null;
+  if (isUserMode())
+    return null;
   const roots = [SCOPES_DIR, ...additionalRoots.filter((r) => r && r !== SCOPES_DIR)];
   for (const root of roots) {
     const path = join(root, scopeId, "jobs", `${slug}.json`);
@@ -15471,4 +15473,4 @@ export {
   src_default as default
 };
 
-//# debugId=E873C85C2CEE1C2464756E2164756E21
+//# debugId=98382CC0EC457B9264756E2164756E21
