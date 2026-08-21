@@ -4,6 +4,51 @@ All notable changes to **opencode-scheduler-ext** are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.6.0-ext.1] — 2026-08-21
+
+### Fixed (background poll for scheduled-run notifications)
+
+- **Bug**: scheduled (cron / launchd / systemd / Task Scheduler) runs
+  completed silently — `runs/<scope>/<slug>.jsonl` was appended by
+  `supervisor.pl` or the opencode CLI in a separate process, but the
+  plugin runtime in the TUI never received an event. Notifications
+  only fired on the next `chat.message` hook (i.e., next time the user
+  or agent sent a chat turn) or TUI restart (`autoNotifyOnResume`).
+  If neither happened, the 9:30 run completion was invisible until
+  somebody interacted with the chat.
+
+- **Fix**: new `startBackgroundPoll(intervalSec)` runs a `setInterval`
+  inside `SchedulerPlugin` that calls `notifyCompletedRuns` every N
+  seconds (default 30). Configurable via
+  `opencode-scheduler.json`:
+
+  ```jsonc
+  { "autoNotify": { "mode": "active", "pollIntervalSec": 30 } }
+  ```
+
+  Set `pollIntervalSec: 0` to disable (chat.message-only mode).
+  Poll NEVER triggers the model in active mode — it only injects
+  silently per-session via `client.session.prompt({ noReply: true })`.
+  Model triggering remains reserved for `autoNotifyOnResume()` on init.
+
+- **Idempotent**: `pollTimer` guard prevents double-timers if the
+  plugin is somehow re-initialized. `stopBackgroundPoll()` available
+  for tests / explicit lifecycle hooks (currently unused).
+
+- **Cost**: ~30 reads per scan × every 30s = ~1 file read/sec across
+  all `runs/*.jsonl`. Negligible. `lastNotifiedAt` is updated by the
+  poll path's `notifyCompletedRuns` call, so the next `chat.message`
+  or next poll tick will see no fresh records (no double-fire).
+
+- Tests: 67/67 pass (8 new in `test/plugin-entry.test.ts` Wave 8 block
+  covering `pollIntervalSec` field, `pollTimer` module var,
+  `startBackgroundPoll` setInterval + idempotency + zero-guard,
+  `stopBackgroundPoll` clearInterval, `autoNotifyOnResume` optional
+  config parameter, `SchedulerPlugin` config-read + poll wiring).
+- Knowledge record:
+  `experience/opencode-plugin-background-poll-pattern` in
+  `experience-records` ragmir project.
+
 ## [1.5.0-ext.1] — 2026-08-21
 
 ### Added (Feature C refinement: session-bound routing + auto-resume)

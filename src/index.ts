@@ -370,6 +370,7 @@ type SchedulerConfig = {
   env?: SchedulerEnvConfig
   autoNotify?: {
     mode?: "off" | "silent" | "active"
+    pollIntervalSec?: number
   }
 }
 
@@ -2339,6 +2340,7 @@ let pluginClient: PluginClient | null = null
 let lastChatSessionId: string | null = null
 let lastToolSessionId: string | null = null
 let lastNotifiedAt: string | null = null
+let pollTimer: ReturnType<typeof setInterval> | null = null
 
 function loadLastNotified(): string | null {
   try {
@@ -2630,11 +2632,11 @@ export async function notifyCompletedRuns(): Promise<void> {
   saveLastNotified(maxFinishedAt)
 }
 
-async function autoNotifyOnResume(): Promise<void> {
+async function autoNotifyOnResume(config?: SchedulerConfig): Promise<void> {
   if (!pluginClient) return
 
-  const config = loadSchedulerConfig()
-  const mode = config.autoNotify?.mode ?? "active"
+  const cfg = config ?? loadSchedulerConfig()
+  const mode = cfg.autoNotify?.mode ?? "active"
   if (mode === "off") return
 
   const { fresh, maxFinishedAt } = collectFreshRuns()
@@ -2656,6 +2658,19 @@ async function autoNotifyOnResume(): Promise<void> {
 
   lastNotifiedAt = maxFinishedAt
   saveLastNotified(maxFinishedAt)
+}
+
+function startBackgroundPoll(intervalSec: number): void {
+  if (pollTimer || intervalSec <= 0) return
+  pollTimer = setInterval(() => {
+    void notifyCompletedRuns()
+  }, intervalSec * 1000)
+}
+
+function stopBackgroundPoll(): void {
+  if (!pollTimer) return
+  clearInterval(pollTimer)
+  pollTimer = null
 }
 
 function runJobNow(job: Job): { startedAt: string; logPath: string; pid?: number; job: Job | null } {
@@ -2918,7 +2933,9 @@ export const SchedulerPlugin: Plugin = async (input) => {
       saveLastNotified(lastNotifiedAt)
     }
   }
-  void autoNotifyOnResume()
+  const config = loadSchedulerConfig()
+  void autoNotifyOnResume(config)
+  startBackgroundPoll(config.autoNotify?.pollIntervalSec ?? 30)
   return {
     "chat.message": async (msgInput) => {
       lastChatSessionId = msgInput.sessionID

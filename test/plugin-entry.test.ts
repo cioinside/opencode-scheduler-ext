@@ -360,7 +360,7 @@ describe("Wave 7: autoNotifyOnResume + SchedulerPlugin wiring", () => {
 
   test("SchedulerPlugin calls autoNotifyOnResume on init and registers tool.execute.before hook", () => {
     const body = pluginBody()
-    expect(body).toMatch(/void\s+autoNotifyOnResume\(\)/)
+    expect(body).toMatch(/void\s+autoNotifyOnResume\(config\)/)
     expect(body).toMatch(/["']tool\.execute\.before["']/)
     expect(body).toMatch(/lastToolSessionId\s*=\s*sid/)
   })
@@ -372,5 +372,56 @@ describe("Wave 7: autoNotifyOnResume + SchedulerPlugin wiring", () => {
 
   test("module-level lastToolSessionId var is declared alongside lastChatSessionId", () => {
     expect(SRC).toMatch(/^\s*let lastToolSessionId:\s*string\s*\|\s*null\s*=\s*null/m)
+  })
+})
+
+describe("Wave 8: background poll triggers notifyCompletedRuns without chat.message", () => {
+  test("SchedulerConfig.autoNotify supports pollIntervalSec field", () => {
+    expect(SRC).toMatch(
+      /type SchedulerConfig\s*=\s*\{[\s\S]*?autoNotify\?:\s*\{[\s\S]*?pollIntervalSec\?:\s*number/,
+    )
+  })
+
+  test("module-level pollTimer var is declared alongside lastNotifiedAt", () => {
+    expect(SRC).toMatch(/^\s*let pollTimer:\s*ReturnType<typeof\s+setInterval>\s*\|\s*null\s*=\s*null/m)
+  })
+
+  test("startBackgroundPoll uses setInterval with intervalSec * 1000 ms", () => {
+    const body = functionBody(/function startBackgroundPoll\([^)]*\)\s*:\s*void\s*\{/)
+    expect(body).toMatch(/setInterval\(/)
+    expect(body).toMatch(/intervalSec\s*\*\s*1000/)
+    expect(body).toMatch(/notifyCompletedRuns\(\)/)
+  })
+
+  test("startBackgroundPoll guards against intervalSec <= 0 (does not start)", () => {
+    const body = functionBody(/function startBackgroundPoll\([^)]*\)\s*:\s*void\s*\{/)
+    expect(body).toMatch(/if\s*\(\s*pollTimer\s*\|\|\s*intervalSec\s*<=\s*0\s*\)\s*return/)
+  })
+
+  test("startBackgroundPoll is idempotent — second call is a no-op", () => {
+    const body = functionBody(/function startBackgroundPoll\([^)]*\)\s*:\s*void\s*\{/)
+    expect(body).toMatch(/if\s*\(\s*pollTimer/)
+    expect(body).toMatch(/return/)
+  })
+
+  test("stopBackgroundPoll clears pollTimer via clearInterval", () => {
+    const body = functionBody(/function stopBackgroundPoll\([^)]*\)\s*:\s*void\s*\{/)
+    expect(body).toMatch(/if\s*\(\s*!pollTimer\s*\)\s*return/)
+    expect(body).toMatch(/clearInterval\(/)
+    expect(body).toMatch(/pollTimer\s*=\s*null/)
+  })
+
+  test("autoNotifyOnResume accepts optional SchedulerConfig (avoid double-read)", () => {
+    const body = functionBody(/async function autoNotifyOnResume\([^)]*\)\s*:\s*Promise<void>\s*\{/)
+    expect(body).toMatch(/config\?:\s*SchedulerConfig/)
+    expect(body).toMatch(/cfg\s*=\s*config\s*\?\?\s*loadSchedulerConfig\(\)/)
+  })
+
+  test("SchedulerPlugin reads config once and calls startBackgroundPoll with default 30", () => {
+    const body = pluginBody()
+    expect(body).toMatch(/const config\s*=\s*loadSchedulerConfig\(\)/)
+    expect(body).toMatch(/startBackgroundPoll\(/)
+    expect(body).toMatch(/config\.autoNotify\?\.pollIntervalSec\s*\?\?\s*30/)
+    expect(body).toMatch(/void\s+autoNotifyOnResume\(config\)/)
   })
 })

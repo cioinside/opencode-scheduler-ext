@@ -74,7 +74,9 @@ This fork writes the following files under `~/.config/opencode/scheduler/`:
     "set": { "LANG": "C.UTF-8" }
   },
   "autoNotify": {
-    "mode": "active"  // off | silent | active — default "active"
+    "mode": "active",          // off | silent | active — default "active"
+    "pollIntervalSec": 30      // background poll for cron-run completions
+                               // — default 30, set 0 to disable (chat.message only)
   }
 }
 ```
@@ -82,6 +84,12 @@ This fork writes the following files under `~/.config/opencode/scheduler/`:
 - `env` is forwarded to scheduled runs (see upstream docs).
 - `autoNotify.mode` controls `autoNotifyOnResume()` on plugin init
   (v1.5.0-ext.1+).
+- `autoNotify.pollIntervalSec` (v1.6.0-ext.1+) sets how often the
+  plugin polls `runs/*.jsonl` for newly completed runs. Solves the
+  silent-completion bug where cron-triggered runs were invisible until
+  the user sent a chat message. The poll path ONLY injects per-session
+  summaries — it does NOT trigger the LLM in `active` mode (that is
+  reserved for plugin init).
 
 ## Install
 

@@ -14155,6 +14155,7 @@ var pluginClient = null;
 var lastChatSessionId = null;
 var lastToolSessionId = null;
 var lastNotifiedAt = null;
+var pollTimer = null;
 function loadLastNotified() {
   try {
     if (!existsSync(LAST_NOTIFIED_PATH))
@@ -14407,11 +14408,11 @@ async function notifyCompletedRuns() {
   lastNotifiedAt = maxFinishedAt;
   saveLastNotified(maxFinishedAt);
 }
-async function autoNotifyOnResume() {
+async function autoNotifyOnResume(config2) {
   if (!pluginClient)
     return;
-  const config2 = loadSchedulerConfig();
-  const mode = config2.autoNotify?.mode ?? "active";
+  const cfg = config2 ?? loadSchedulerConfig();
+  const mode = cfg.autoNotify?.mode ?? "active";
   if (mode === "off")
     return;
   const { fresh, maxFinishedAt } = collectFreshRuns();
@@ -14430,6 +14431,13 @@ async function autoNotifyOnResume() {
   }
   lastNotifiedAt = maxFinishedAt;
   saveLastNotified(maxFinishedAt);
+}
+function startBackgroundPoll(intervalSec) {
+  if (pollTimer || intervalSec <= 0)
+    return;
+  pollTimer = setInterval(() => {
+    notifyCompletedRuns();
+  }, intervalSec * 1000);
 }
 function runJobNow(job) {
   ensureDir(LOGS_DIR);
@@ -14663,7 +14671,9 @@ var SchedulerPlugin = async (input) => {
       saveLastNotified(lastNotifiedAt);
     }
   }
-  autoNotifyOnResume();
+  const config2 = loadSchedulerConfig();
+  autoNotifyOnResume(config2);
+  startBackgroundPoll(config2.autoNotify?.pollIntervalSec ?? 30);
   return {
     "chat.message": async (msgInput) => {
       lastChatSessionId = msgInput.sessionID;
@@ -15293,4 +15303,4 @@ export {
   slugify
 };
 
-//# debugId=D0A3B5486B1DD1A764756E2164756E21
+//# debugId=D1DC725E622D1CB364756E2164756E21
