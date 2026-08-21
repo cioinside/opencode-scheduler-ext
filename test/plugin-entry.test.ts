@@ -573,9 +573,9 @@ describe("Wave 8.3: bulletproof error handling — no unhandled promise rejectio
     expect(body).toMatch(/console\.error\([^)]*emitBatchToast\.showToast failed/)
   })
 
-  test("injectBatchIntoPrompt logs diagnostic info on entry and on appendPrompt failure", () => {
+  test("injectBatchIntoPrompt logs error only on appendPrompt failure (no entry debug log — TUI pollution)", () => {
     const body = functionBody(/async function injectBatchIntoPrompt\([^)]*\)\s*:\s*Promise<void>\s*\{/)
-    expect(body).toContain("[scheduler-ext] injectBatchIntoPrompt:")
+    expect(body).not.toContain("[scheduler-ext] injectBatchIntoPrompt:")
     expect(body).toContain("[scheduler-ext] injectBatchIntoPrompt.appendPrompt failed")
   })
 

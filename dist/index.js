@@ -14373,7 +14373,6 @@ async function injectBatchIntoPrompt(records) {
   if (!pluginClient || records.length === 0)
     return;
   const summary = formatBatchSummary(records);
-  console.error("[scheduler-ext] injectBatchIntoPrompt:", records.length, records.length === 1 ? "record -> current TUI" : "records -> current TUI");
   try {
     await withTimeout(pluginClient.tui.appendPrompt({ text: summary }), PLUGIN_CLIENT_TIMEOUT_MS, "injectBatchIntoPrompt.appendPrompt");
   } catch (err) {
@@ -15456,4 +15455,4 @@ export {
   src_default as default
 };
 
-//# debugId=013B7FE77233BB9664756E2164756E21
+//# debugId=0DECABBAE32347AB64756E2164756E21

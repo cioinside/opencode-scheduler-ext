@@ -4,6 +4,66 @@ All notable changes to **opencode-scheduler-ext** are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.6.4-ext.9] — 2026-08-21
+
+### Removed (debug console.error in TUI notification path)
+
+`injectBatchIntoPrompt` had a debug `console.error` that printed
+`injectBatchIntoPrompt: N records -> current TUI` to stderr on every
+successful notification. In the TUI, `console.error` writes break into
+the rendered interface layout — visible to the user and the agent as
+stray log lines in the middle of the chat.
+
+The user-facing channels are already correct:
+- `tui.showToast(...)` — toast at top of TUI (user-facing notification)
+- `tui.appendPrompt(...)` — text appended to the input field (user-facing content)
+
+Debug-level `console.error` should not be in the user-visible TUI at all.
+Removed. If something fails, it's already handled by the surrounding
+try/catch and `withTimeout` (ext.6 manual settle). Real errors still
+raise — the user just no longer sees raw stderr pollution.
+
+```
+# Before — visible in TUI:
+[scheduler-ext] injectBatchIntoPrompt: 1 record -> current TUI
+[scheduler-ext] injectBatchIntoPrompt: 2 records -> current TUI
+
+# After — silent on success; toast + prompt injection are the user channels
+(no debug output, toast appears, prompt text appears)
+```
+
+Note: the other `console.error` calls in `src/index.ts` (in catch blocks
+of `emitBatchToast`, `injectCompletionIntoPrompt`, `injectBatchIntoSession`,
+`triggerAgentOnSession`, `notifyCompletedRuns`, `autoNotifyOnResume`) are
+kept — they only fire on genuine errors and `injectBatchIntoSession` /
+`triggerAgentOnSession` are already gated by `isUserMode()` (ext.7),
+so under non-root they never execute.
+
+### Companion runtime fix (not in npm package, deployed separately)
+
+`supervisor.pl` (runtime config at `~/.config/opencode/scheduler/supervisor.pl`,
+NOT in this npm package) had only per-slug locks. 15 cron entries in
+`qtrader-f78fa377a2c6` scope, all on `*/5 * * * *`, started 15 concurrent
+`opencode run` processes (history: PIDs 1281081, 1281093, 1281101,
+1281137, 1281144, 1281145 all started at 17:30:01 simultaneously).
+
+Fix: added `use Fcntl qw(:flock)` + non-blocking flock on
+`$locks_dir/.global.lock` (which already existed as a 0-byte file but was
+never wired in). Placed BEFORE per-slug lock check. Second concurrent
+supervisor instance now exits with:
+
+```
+=== Scheduled run skipped (another job running in scope qtrader-f78fa377a2c6) ===
+```
+
+Verified by test: spawned two `supervisor.pl` processes against a temp
+scope, Job A held the lock for 30s, Job B exited 0 with skip message
+in its log.
+
+Deployed: `/root/.config/opencode/scheduler/supervisor.pl` (sha256
+`130e77e386104a0e47a9b931c7866a50bc1638d25bd689d28da9cbdba82fca44`)
+and `/home/user/.config/opencode/scheduler/supervisor.pl` (same sha256).
+
 ## [1.6.4-ext.8] — 2026-08-21
 
 ### Fixed (grammar in injectBatchIntoPrompt log)
