@@ -4,6 +4,79 @@ All notable changes to **opencode-scheduler-ext** are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.6.4-ext.15] — 2026-08-21
+
+### Changed (per-session routing — each notification → its creator session)
+
+ext.14 had a single consumer_id (`lastChatSessionId` or fallback). That
+caused re-delivery spam when the user switched conversations via
+`/sessions`, because cursor was tied to "the most recent chat session"
+— which is exactly what was missing notifications.
+
+ext.15 fixes this by routing each notification to the SESSION that
+created its job, regardless of which conversation is currently active
+in the user's TUI:
+
+```ts
+async function pollNotificationsDb(): Promise<void> {
+  // 1. Ingest new JSONL → DB
+  ingestJsonlToDb(db)
+  // 2. Read all notifications, group by target session
+  const allRows = db.query("SELECT ... FROM notifications ORDER BY id").all()
+  const byTarget = new Map<string, RunRecord[]>()
+  for (const r of allRows) {
+    const target = getJobSessionIdForDelivery(r.scopeId, r.slug)
+                  ?? TUI_FALLBACK_TARGET
+    (byTarget.get(target) ?? []).push(r)
+  }
+  // 3. Deliver per target via session.prompt
+  for (const [target, records] of byTarget) {
+    await deliverToTarget(db, target, records)
+  }
+}
+```
+
+`getJobSessionIdForDelivery` reads `job.sessionId` from `job.json` —
+the value already captured by `schedule_job` from
+`lastToolSessionId ?? lastChatSessionId` at the moment the user
+created the job. This intentionally BYPASSES the ext.11 defensive
+gate (`if (isUserMode()) return null`): stale sessionIds cause
+`session.prompt` to return "Session not found", which we catch,
+log, and DON'T advance the cursor. Next tick retries. If the user
+eventually `/continue`s to that session, delivery succeeds.
+
+Behavior:
+- Job created in conversation-A → notifications go to A's prompt only
+- Job created in conversation-B → notifications go to B's prompt only
+- Switching between A and B in TUI doesn't re-deliver (each session
+  has its own cursor row keyed by its sessionId)
+- Job whose `job.json` is missing/deleted → falls back to TUI's current
+  prompt with `TUI_FALLBACK_TARGET = "__tui_fallback__"` cursor
+- Stale sessionId → delivery fails gracefully, cursor doesn't advance,
+  retry until `/continue` succeeds
+
+Env override (orthogonal):
+- `OPENCODE_SCHEDULER_CONSUMER_ID=<name>` makes the plugin use
+  `pollNotificationsDbForConsumer(consumerId)` instead of the
+  per-session router. This consumer sees ALL notifications regardless
+  of creator session — useful for CLI dashboards / web hooks / external
+  monitors. If `<name>` starts with `ses_`, delivery uses
+  `session.prompt`; otherwise `tui.appendPrompt`.
+
+Files:
+- Removed `getConsumerId()` — no longer needed
+- Added `getJobSessionIdForDelivery()` — bypasses ext.11 gate
+- Added `TUI_FALLBACK_TARGET` constant
+- Rewrote `pollNotificationsDb()` as per-session router (no consumerId
+  arg)
+- Added `deliverToTarget(db, target, records)` helper
+- Added `pollNotificationsDbForConsumer(consumerId)` for env-override
+
+Tests: 103/103 pass.
+
+Related: L15 lesson will be recorded in
+`experience-records/experience/opencode-scheduler-cross-home-multiroot/note-v14.md`.
+
 ## [1.6.4-ext.14] — 2026-08-21
 
 ### Changed (consumer identity = opencode session ID, no file)

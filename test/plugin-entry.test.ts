@@ -584,39 +584,13 @@ describe("Wave 8.3: bulletproof error handling — no unhandled promise rejectio
   })
 })
 
-describe("ext.13/ext.14: SQLite-backed multi-consumer notification store", () => {
+describe("ext.15: per-session routing — each notification → its creator session", () => {
   test("imports Database from bun:sqlite", () => {
     expect(SRC).toMatch(/import\s*\{\s*Database\s*\}\s*from\s*["']bun:sqlite["']/)
   })
 
-  test("NOTIFICATIONS_DB_PATH constant exists under SCHEDULER_DIR (ext.13)", () => {
-    expect(SRC).toMatch(/NOTIFICATIONS_DB_PATH\s*=\s*join\(SCHEDULER_DIR\s*,\s*["']scheduler\.db["']\)/)
-  })
-
-  test("CONSUMER_ID_PATH file is REMOVED in ext.14 (no more file-based identity)", () => {
-    expect(SRC).not.toMatch(/CONSUMER_ID_PATH\s*=/)
-  })
-
-  test("getConsumerId uses OPENCODE_SCHEDULER_CONSUMER_ID env override first", () => {
-    const body = extractFnBody("getConsumerId")
-    expect(body).toMatch(/process\.env\.OPENCODE_SCHEDULER_CONSUMER_ID/)
-  })
-
-  test("getConsumerId falls back to lastChatSessionId (opencode TUI session id)", () => {
-    const body = extractFnBody("getConsumerId")
-    expect(body).toMatch(/lastChatSessionId/)
-  })
-
-  test("getConsumerId ultimate fallback is proc-${pid} (per-process identity)", () => {
-    const body = extractFnBody("getConsumerId")
-    expect(body).toMatch(/proc-\$\{process\.pid\}/)
-  })
-
-  test("getConsumerId no longer writes/reads any file", () => {
-    const body = extractFnBody("getConsumerId")
-    expect(body).not.toMatch(/writeFileSync/)
-    expect(body).not.toMatch(/readFileSync/)
-    expect(body).not.toMatch(/randomUUID/)
+  test("TUI_FALLBACK_TARGET constant exists for orphaned notifications", () => {
+    expect(SRC).toMatch(/TUI_FALLBACK_TARGET\s*=\s*["']__tui_fallback__["']/)
   })
 
   test("getDb opens Database with create:true + WAL mode + schema migration", () => {
@@ -629,6 +603,12 @@ describe("ext.13/ext.14: SQLite-backed multi-consumer notification store", () =>
     expect(body).toMatch(/consumer_id\s+TEXT\s+PRIMARY\s+KEY/)
   })
 
+  test("getJobSessionIdForDelivery reads job.sessionId WITHOUT ext.11 defensive gate", () => {
+    const body = extractFnBody("getJobSessionIdForDelivery")
+    expect(body).toMatch(/job\.sessionId/)
+    expect(body).not.toMatch(/isUserMode/)
+  })
+
   test("ingestJsonlToDb reads new JSONL lines, INSERTs OR IGNOREs by run_id, advances cursor", () => {
     const body = extractFnBody("ingestJsonlToDb")
     expect(body).toMatch(/readFileSync\(NOTIFICATIONS_PATH/)
@@ -637,30 +617,39 @@ describe("ext.13/ext.14: SQLite-backed multi-consumer notification store", () =>
     expect(body).toMatch(/saveNotificationsCursor/)
   })
 
-  test("pollNotificationsDb reads unconsumed rows for this consumer + calls appendPrompt", () => {
+  test("pollNotificationsDb groups notifications by getJobSessionIdForDelivery target", () => {
     const body = extractFnBody("pollNotificationsDb")
-    expect(body).toMatch(/SELECT\s+last_id\s+FROM\s+consumers\s+WHERE\s+consumer_id\s*=/)
-    expect(body).toMatch(/WHERE\s+id\s*>\s*\?/)
+    expect(body).toMatch(/ingestJsonlToDb\(db\)/)
+    expect(body).toMatch(/getJobSessionIdForDelivery\(/)
+    expect(body).toMatch(/TUI_FALLBACK_TARGET/)
+    expect(body).toMatch(/byTarget\.set\(/)
+    expect(body).toMatch(/deliverToTarget\(db/)
+  })
+
+  test("deliverToTarget uses session.prompt for session targets, tui.appendPrompt for fallback", () => {
+    const body = extractFnBody("deliverToTarget")
+    expect(body).toMatch(/target\s*===\s*TUI_FALLBACK_TARGET/)
     expect(body).toMatch(/pluginClient(\??)\.tui\.appendPrompt/)
+    expect(body).toMatch(/pluginClient(\??)\.session\.prompt/)
+    expect(body).toMatch(/path:\s*\{\s*id:\s*target\s*\}/)
     expect(body).toMatch(/ON\s+CONFLICT\(consumer_id\)\s+DO\s+UPDATE\s+SET/)
   })
 
-  test("pollNotificationsDb delegates ingestion via ingestJsonlToDb before querying", () => {
-    const body = extractFnBody("pollNotificationsDb")
-    expect(body).toMatch(/ingestJsonlToDb\(db\)/)
-    expect(body).toMatch(/SELECT[\s\S]*FROM\s+notifications/)
+  test("pollNotificationsDbForConsumer sees ALL notifications (env override path)", () => {
+    const body = extractFnBody("pollNotificationsDbForConsumer")
+    expect(body).toMatch(/WHERE\s+id\s*>\s*\?/)
+    expect(body).toMatch(/consumerId\.startsWith\(["']ses_["']\)/)
+    expect(body).toMatch(/pluginClient(\??)\.session\.prompt/)
+    expect(body).toMatch(/pluginClient(\??)\.tui\.appendPrompt/)
   })
 
-  test("startBackgroundPoll calls pollNotificationsDb (not pollNotificationsFile)", () => {
+  test("startBackgroundPoll branches on OPENCODE_SCHEDULER_CONSUMER_ID env var", () => {
     const body = functionBody(/function startBackgroundPoll\([^)]*\)\s*:\s*void\s*\{/)
-    expect(body).toMatch(/pollNotificationsDb/)
-    expect(body).not.toMatch(/pollNotificationsFile/)
-  })
-
-  test("startBackgroundPoll captures a stable consumerId once per tick", () => {
-    const body = functionBody(/function startBackgroundPoll\([^)]*\)\s*:\s*void\s*\{/)
-    expect(body).toMatch(/getConsumerId\(\)/)
-    expect(body).toMatch(/pollNotificationsDb\(consumerId\)/)
+    expect(body).toMatch(/process\.env\.OPENCODE_SCHEDULER_CONSUMER_ID/)
+    expect(body).toMatch(/pollNotificationsDb\(\)/)
+    expect(body).toMatch(/pollNotificationsDbForConsumer\(envConsumerId\)/)
+    expect(body).not.toMatch(/getConsumerId\(\)/)
+    expect(body).not.toMatch(/pollNotificationsDb\(consumerId\)/)
   })
 
   test("injectBatchIntoPrompt still delegates to appendNotificationsToFile (ext.12 producer side)", () => {

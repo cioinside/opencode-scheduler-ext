@@ -33,6 +33,7 @@ const LAST_NOTIFIED_PATH = join(SCHEDULER_DIR, "last-notified-at.txt")
 const NOTIFICATIONS_PATH = join(SCHEDULER_DIR, "notifications.jsonl")
 const NOTIFICATIONS_CURSOR_PATH = join(SCHEDULER_DIR, "notifications.cursor")
 const NOTIFICATIONS_DB_PATH = join(SCHEDULER_DIR, "scheduler.db")
+const TUI_FALLBACK_TARGET = "__tui_fallback__"
 
 // Platform detection
 const IS_MAC = platform() === "darwin"
@@ -2530,6 +2531,27 @@ function lookupSessionForJob(
   return null
 }
 
+function getJobSessionIdForDelivery(
+  scopeId: string | undefined,
+  slug: string | undefined,
+  additionalRoots: string[] = []
+): string | null {
+  if (!scopeId || !slug) return null
+  const roots = [SCOPES_DIR, ...additionalRoots.filter((r) => r && r !== SCOPES_DIR)]
+  for (const root of roots) {
+    const path = join(root, scopeId, "jobs", `${slug}.json`)
+    try {
+      if (!existsSync(path)) continue
+      const raw = readFileSync(path, "utf-8")
+      const job = JSON.parse(raw) as Partial<Job>
+      return typeof job.sessionId === "string" ? job.sessionId : null
+    } catch {
+      continue
+    }
+  }
+  return null
+}
+
 function formatRunSummary(run: RunRecord): string {
   const slug = run.slug ?? "?"
   const status = run.status ?? "unknown"
@@ -2688,13 +2710,6 @@ function saveNotificationsCursor(n: number): void {
 
 let notificationsCursor: number | null = null
 
-function getConsumerId(): string {
-  const envId = process.env.OPENCODE_SCHEDULER_CONSUMER_ID
-  if (envId && envId.length > 0) return envId
-  if (lastChatSessionId) return lastChatSessionId
-  return `proc-${process.pid}`
-}
-
 function getDb(): Database | null {
   try {
     const db = new Database(NOTIFICATIONS_DB_PATH, { create: true })
@@ -2783,7 +2798,86 @@ function ingestJsonlToDb(db: Database): number {
   return inserted
 }
 
-async function pollNotificationsDb(consumerId: string): Promise<void> {
+async function pollNotificationsDb(): Promise<void> {
+  if (!pluginClient) return
+  const db = getDb()
+  if (!db) return
+  try {
+    ingestJsonlToDb(db)
+    const allRows = db
+      .prepare(
+        `SELECT id, timestamp, scope_id AS scopeId, slug, run_id AS runId,
+                status, exit_code AS exitCode, finished_at AS finishedAt,
+                duration_ms AS durationMs, log_path AS logPath
+         FROM notifications
+         ORDER BY id`,
+      )
+      .all() as Array<RunRecord & { id: number }>
+    if (allRows.length === 0) return
+    const byTarget = new Map<string, Array<RunRecord & { id: number }>>()
+    for (const r of allRows) {
+      const target = getJobSessionIdForDelivery(r.scopeId, r.slug) ?? TUI_FALLBACK_TARGET
+      const bucket = byTarget.get(target) ?? []
+      bucket.push(r)
+      byTarget.set(target, bucket)
+    }
+    for (const [target, records] of byTarget) {
+      await deliverToTarget(db, target, records)
+    }
+  } finally {
+    try {
+      db.close()
+    } catch {}
+  }
+}
+
+async function deliverToTarget(
+  db: Database,
+  target: string,
+  allRecords: Array<RunRecord & { id: number }>,
+): Promise<void> {
+  const row = db
+    .prepare(`SELECT last_id FROM consumers WHERE consumer_id = ?`)
+    .get(target) as { last_id: number } | null
+  const lastId = row?.last_id ?? 0
+  const unconsumed = allRecords.filter((r) => r.id > lastId)
+  if (unconsumed.length === 0) return
+  const summary = formatBatchSummary(unconsumed)
+  try {
+    if (target === TUI_FALLBACK_TARGET) {
+      await withTimeout(
+        pluginClient?.tui.appendPrompt({ text: summary }),
+        PLUGIN_CLIENT_TIMEOUT_MS,
+        "deliverToTarget.tui",
+      )
+    } else {
+      await withTimeout(
+        pluginClient?.session.prompt({
+          path: { id: target },
+          body: { parts: [{ type: "text", text: summary }] },
+        }),
+        PLUGIN_CLIENT_TIMEOUT_MS,
+        "deliverToTarget.session",
+      )
+    }
+  } catch (err) {
+    console.error(
+      `[scheduler-ext] deliverToTarget ${target} failed:`,
+      err instanceof Error ? err.message : String(err),
+    )
+    return
+  }
+  const maxId = unconsumed[unconsumed.length - 1].id
+  db.prepare(
+    `INSERT INTO consumers (consumer_id, last_id, updated_at)
+     VALUES (?, ?, ?)
+     ON CONFLICT(consumer_id) DO UPDATE SET
+       last_id = excluded.last_id,
+       updated_at = excluded.updated_at`,
+  ).run(target, maxId, new Date().toISOString())
+}
+
+async function pollNotificationsDbForConsumer(consumerId: string): Promise<void> {
   if (!pluginClient) return
   const db = getDb()
   if (!db) return
@@ -2807,14 +2901,25 @@ async function pollNotificationsDb(consumerId: string): Promise<void> {
     if (records.length === 0) return
     const summary = formatBatchSummary(records)
     try {
-      await withTimeout(
-        pluginClient.tui.appendPrompt({ text: summary }),
-        PLUGIN_CLIENT_TIMEOUT_MS,
-        "pollNotificationsDb.appendPrompt",
-      )
+      if (consumerId.startsWith("ses_")) {
+        await withTimeout(
+          pluginClient.session.prompt({
+            path: { id: consumerId },
+            body: { parts: [{ type: "text", text: summary }] },
+          }),
+          PLUGIN_CLIENT_TIMEOUT_MS,
+          "pollNotificationsDbForConsumer.session",
+        )
+      } else {
+        await withTimeout(
+          pluginClient.tui.appendPrompt({ text: summary }),
+          PLUGIN_CLIENT_TIMEOUT_MS,
+          "pollNotificationsDbForConsumer.tui",
+        )
+      }
     } catch (err) {
       console.error(
-        "[scheduler-ext] pollNotificationsDb.appendPrompt failed:",
+        `[scheduler-ext] pollNotificationsDbForConsumer ${consumerId} failed:`,
         err instanceof Error ? err.message : String(err),
       )
       return
@@ -3068,7 +3173,8 @@ async function autoNotifyOnResume(config?: SchedulerConfig): Promise<void> {
 
 function startBackgroundPoll(intervalSec: number): void {
   if (pollTimer || intervalSec <= 0) return
-  const consumerId = getConsumerId()
+  const envConsumerId = process.env.OPENCODE_SCHEDULER_CONSUMER_ID
+  const useEnvOverride = !!envConsumerId && envConsumerId.length > 0
   pollTimer = setInterval(() => {
     void notifyCompletedRuns().catch((err) => {
       console.error(
@@ -3076,12 +3182,21 @@ function startBackgroundPoll(intervalSec: number): void {
         err instanceof Error ? err.stack || err.message : String(err),
       )
     })
-    void pollNotificationsDb(consumerId).catch((err) => {
-      console.error(
-        "[scheduler-ext] notifications-db poll tick rejected:",
-        err instanceof Error ? err.stack || err.message : String(err),
-      )
-    })
+    if (useEnvOverride) {
+      void pollNotificationsDbForConsumer(envConsumerId).catch((err) => {
+        console.error(
+          "[scheduler-ext] notifications-db poll tick rejected (env-override):",
+          err instanceof Error ? err.stack || err.message : String(err),
+        )
+      })
+    } else {
+      void pollNotificationsDb().catch((err) => {
+        console.error(
+          "[scheduler-ext] notifications-db poll tick rejected (per-session):",
+          err instanceof Error ? err.stack || err.message : String(err),
+        )
+      })
+    }
   }, intervalSec * 1000)
   // Required: unref() so opencode CLI commands (`mcp list` etc.) can exit; without it the interval keeps Node alive.
   pollTimer.unref()

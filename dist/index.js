@@ -12359,6 +12359,7 @@ var LAST_NOTIFIED_PATH = join(SCHEDULER_DIR, "last-notified-at.txt");
 var NOTIFICATIONS_PATH = join(SCHEDULER_DIR, "notifications.jsonl");
 var NOTIFICATIONS_CURSOR_PATH = join(SCHEDULER_DIR, "notifications.cursor");
 var NOTIFICATIONS_DB_PATH = join(SCHEDULER_DIR, "scheduler.db");
+var TUI_FALLBACK_TARGET = "__tui_fallback__";
 var IS_MAC = platform() === "darwin";
 var IS_LINUX = platform() === "linux";
 var IS_WINDOWS = platform() === "win32";
@@ -14344,6 +14345,24 @@ function lookupSessionForJob(scopeId, slug, additionalRoots = []) {
   }
   return null;
 }
+function getJobSessionIdForDelivery(scopeId, slug, additionalRoots = []) {
+  if (!scopeId || !slug)
+    return null;
+  const roots = [SCOPES_DIR, ...additionalRoots.filter((r) => r && r !== SCOPES_DIR)];
+  for (const root of roots) {
+    const path = join(root, scopeId, "jobs", `${slug}.json`);
+    try {
+      if (!existsSync(path))
+        continue;
+      const raw = readFileSync(path, "utf-8");
+      const job = JSON.parse(raw);
+      return typeof job.sessionId === "string" ? job.sessionId : null;
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
 function formatBatchSummary(records) {
   const lines = [];
   const noun = records.length === 1 ? "job" : "jobs";
@@ -14451,14 +14470,6 @@ function saveNotificationsCursor(n) {
   } catch {}
 }
 var notificationsCursor = null;
-function getConsumerId() {
-  const envId = process.env.OPENCODE_SCHEDULER_CONSUMER_ID;
-  if (envId && envId.length > 0)
-    return envId;
-  if (lastChatSessionId)
-    return lastChatSessionId;
-  return `proc-${process.pid}`;
-}
 function getDb() {
   try {
     const db = new Database(NOTIFICATIONS_DB_PATH, { create: true });
@@ -14531,7 +14542,65 @@ function ingestJsonlToDb(db) {
   saveNotificationsCursor(lines.length);
   return inserted;
 }
-async function pollNotificationsDb(consumerId) {
+async function pollNotificationsDb() {
+  if (!pluginClient)
+    return;
+  const db = getDb();
+  if (!db)
+    return;
+  try {
+    ingestJsonlToDb(db);
+    const allRows = db.prepare(`SELECT id, timestamp, scope_id AS scopeId, slug, run_id AS runId,
+                status, exit_code AS exitCode, finished_at AS finishedAt,
+                duration_ms AS durationMs, log_path AS logPath
+         FROM notifications
+         ORDER BY id`).all();
+    if (allRows.length === 0)
+      return;
+    const byTarget = new Map;
+    for (const r of allRows) {
+      const target = getJobSessionIdForDelivery(r.scopeId, r.slug) ?? TUI_FALLBACK_TARGET;
+      const bucket = byTarget.get(target) ?? [];
+      bucket.push(r);
+      byTarget.set(target, bucket);
+    }
+    for (const [target, records] of byTarget) {
+      await deliverToTarget(db, target, records);
+    }
+  } finally {
+    try {
+      db.close();
+    } catch {}
+  }
+}
+async function deliverToTarget(db, target, allRecords) {
+  const row = db.prepare(`SELECT last_id FROM consumers WHERE consumer_id = ?`).get(target);
+  const lastId = row?.last_id ?? 0;
+  const unconsumed = allRecords.filter((r) => r.id > lastId);
+  if (unconsumed.length === 0)
+    return;
+  const summary = formatBatchSummary(unconsumed);
+  try {
+    if (target === TUI_FALLBACK_TARGET) {
+      await withTimeout(pluginClient?.tui.appendPrompt({ text: summary }), PLUGIN_CLIENT_TIMEOUT_MS, "deliverToTarget.tui");
+    } else {
+      await withTimeout(pluginClient?.session.prompt({
+        path: { id: target },
+        body: { parts: [{ type: "text", text: summary }] }
+      }), PLUGIN_CLIENT_TIMEOUT_MS, "deliverToTarget.session");
+    }
+  } catch (err) {
+    console.error(`[scheduler-ext] deliverToTarget ${target} failed:`, err instanceof Error ? err.message : String(err));
+    return;
+  }
+  const maxId = unconsumed[unconsumed.length - 1].id;
+  db.prepare(`INSERT INTO consumers (consumer_id, last_id, updated_at)
+     VALUES (?, ?, ?)
+     ON CONFLICT(consumer_id) DO UPDATE SET
+       last_id = excluded.last_id,
+       updated_at = excluded.updated_at`).run(target, maxId, new Date().toISOString());
+}
+async function pollNotificationsDbForConsumer(consumerId) {
   if (!pluginClient)
     return;
   const db = getDb();
@@ -14552,9 +14621,16 @@ async function pollNotificationsDb(consumerId) {
       return;
     const summary = formatBatchSummary(records);
     try {
-      await withTimeout(pluginClient.tui.appendPrompt({ text: summary }), PLUGIN_CLIENT_TIMEOUT_MS, "pollNotificationsDb.appendPrompt");
+      if (consumerId.startsWith("ses_")) {
+        await withTimeout(pluginClient.session.prompt({
+          path: { id: consumerId },
+          body: { parts: [{ type: "text", text: summary }] }
+        }), PLUGIN_CLIENT_TIMEOUT_MS, "pollNotificationsDbForConsumer.session");
+      } else {
+        await withTimeout(pluginClient.tui.appendPrompt({ text: summary }), PLUGIN_CLIENT_TIMEOUT_MS, "pollNotificationsDbForConsumer.tui");
+      }
     } catch (err) {
-      console.error("[scheduler-ext] pollNotificationsDb.appendPrompt failed:", err instanceof Error ? err.message : String(err));
+      console.error(`[scheduler-ext] pollNotificationsDbForConsumer ${consumerId} failed:`, err instanceof Error ? err.message : String(err));
       return;
     }
     const maxId = records[records.length - 1].id;
@@ -14759,14 +14835,21 @@ async function autoNotifyOnResume(config2) {
 function startBackgroundPoll(intervalSec) {
   if (pollTimer || intervalSec <= 0)
     return;
-  const consumerId = getConsumerId();
+  const envConsumerId = process.env.OPENCODE_SCHEDULER_CONSUMER_ID;
+  const useEnvOverride = !!envConsumerId && envConsumerId.length > 0;
   pollTimer = setInterval(() => {
     notifyCompletedRuns().catch((err) => {
       console.error("[scheduler-ext] background poll tick rejected:", err instanceof Error ? err.stack || err.message : String(err));
     });
-    pollNotificationsDb(consumerId).catch((err) => {
-      console.error("[scheduler-ext] notifications-db poll tick rejected:", err instanceof Error ? err.stack || err.message : String(err));
-    });
+    if (useEnvOverride) {
+      pollNotificationsDbForConsumer(envConsumerId).catch((err) => {
+        console.error("[scheduler-ext] notifications-db poll tick rejected (env-override):", err instanceof Error ? err.stack || err.message : String(err));
+      });
+    } else {
+      pollNotificationsDb().catch((err) => {
+        console.error("[scheduler-ext] notifications-db poll tick rejected (per-session):", err instanceof Error ? err.stack || err.message : String(err));
+      });
+    }
   }, intervalSec * 1000);
   pollTimer.unref();
 }
@@ -15649,4 +15732,4 @@ export {
   src_default as default
 };
 
-//# debugId=0FFD3FE8DB449CC464756E2164756E21
+//# debugId=7DA57B9BFFA2012264756E2164756E21
