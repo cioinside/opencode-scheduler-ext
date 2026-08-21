@@ -14708,11 +14708,13 @@ var SchedulerPlugin = async (input) => {
     }
   }
   const config2 = loadSchedulerConfig();
-  console.error("[scheduler-ext] plugin loaded, lastNotifiedAt=", lastNotifiedAt, "pollIntervalSec=", config2.autoNotify?.pollIntervalSec ?? 30);
-  autoNotifyOnResume(config2).catch((err) => {
-    console.error("[scheduler-ext] autoNotifyOnResume rejected at plugin entry:", err instanceof Error ? err.stack || err.message : String(err));
+  console.error(`[scheduler-ext] plugin loaded, lastNotifiedAt=${lastNotifiedAt} pollIntervalSec=${config2.autoNotify?.pollIntervalSec ?? 30}`);
+  setImmediate(() => {
+    autoNotifyOnResume(config2).catch((err) => {
+      console.error("[scheduler-ext] autoNotifyOnResume rejected at plugin entry:", err instanceof Error ? err.stack || err.message : String(err));
+    });
+    startBackgroundPoll(config2.autoNotify?.pollIntervalSec ?? 30);
   });
-  startBackgroundPoll(config2.autoNotify?.pollIntervalSec ?? 30);
   return {
     "chat.message": async (msgInput) => {
       lastChatSessionId = msgInput.sessionID;
@@ -15350,4 +15352,4 @@ export {
   slugify
 };
 
-//# debugId=7ED671FC57BE7BAA64756E2164756E21
+//# debugId=FCCA3E820961DC4564756E2164756E21

@@ -3008,18 +3008,19 @@ export const SchedulerPlugin: Plugin = async (input) => {
   }
   const config = loadSchedulerConfig()
   console.error(
-    "[scheduler-ext] plugin loaded, lastNotifiedAt=",
-    lastNotifiedAt,
-    "pollIntervalSec=",
-    config.autoNotify?.pollIntervalSec ?? 30,
+    `[scheduler-ext] plugin loaded, lastNotifiedAt=${lastNotifiedAt} pollIntervalSec=${config.autoNotify?.pollIntervalSec ?? 30}`,
   )
-  void autoNotifyOnResume(config).catch((err) => {
-    console.error(
-      "[scheduler-ext] autoNotifyOnResume rejected at plugin entry:",
-      err instanceof Error ? err.stack || err.message : String(err),
-    )
+  // Defer to next macrotask: entry Promise must resolve before any of our
+  // server-bound or timer work starts (critical under server overload).
+  setImmediate(() => {
+    void autoNotifyOnResume(config).catch((err) => {
+      console.error(
+        "[scheduler-ext] autoNotifyOnResume rejected at plugin entry:",
+        err instanceof Error ? err.stack || err.message : String(err),
+      )
+    })
+    startBackgroundPoll(config.autoNotify?.pollIntervalSec ?? 30)
   })
-  startBackgroundPoll(config.autoNotify?.pollIntervalSec ?? 30)
   return {
     "chat.message": async (msgInput) => {
       lastChatSessionId = msgInput.sessionID

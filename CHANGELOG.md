@@ -4,6 +4,42 @@ All notable changes to **opencode-scheduler-ext** are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.6.4-ext.1] — 2026-08-21
+
+### Changed (defensive plugin entry)
+
+After v1.6.3-ext.1 the user's TUI hung after the plugin-load banner.
+Investigation showed the real cause was server overload from 15+
+concurrent `opencode run` jobs spawned by overlapping cron `*/5`
+schedules (8 supervisor.pl instances, no global concurrency limit). The
+plugin entry itself returned cleanly, but opencode's TUI init phase
+could not get responses from the overloaded server.
+
+This release adds two defensive measures so any future server-overload
+situation never competes with TUI init for worker bandwidth:
+
+- **`SchedulerPlugin` entry**: post-banner work (`autoNotifyOnResume`
+  + `startBackgroundPoll`) is wrapped in `setImmediate(() => {...})`.
+  The entry Promise now resolves with the hooks object before any of
+  our own server-bound or timer work starts. The opencode TUI init
+  phase (which begins after every plugin returns) starts unblocked.
+- **Banner**: changed from multi-arg `console.error("[scheduler-ext]
+  plugin loaded, lastNotifiedAt=", lastNotifiedAt, "pollIntervalSec=",
+  pollSec)` to a single template-literal call so the line is rendered
+  atomically (no multi-arg spacing artefacts some TTY buffers split
+  awkwardly).
+
+#### Operational companion change
+
+The **real** fix for the user's TUI hang was operational, in a
+separate file outside this repo: `supervisor.pl` was modified to
+acquire a non-blocking flock on a shared `$locks_dir/.global.lock`
+file. When `flock(LOCK_EX|LOCK_NB)` fails, supervisor.pl exits 0 with
+a "skipped (global concurrency=1 reached)" log line instead of
+spawning another `opencode run`. Across all 8 cron jobs this enforces
+hard concurrency-limit = 1, preventing the cron-overlap pattern that
+overwhelms the opencode-server.
+
 ## [1.6.3-ext.1] — 2026-08-21
 
 ### Fixed (TUI crash from "Unexpected server error")
