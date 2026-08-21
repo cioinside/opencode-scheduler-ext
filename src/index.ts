@@ -16,7 +16,6 @@ import { tool } from "@opencode-ai/plugin"
 import { appendFileSync, createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync, unlinkSync } from "fs"
 import { basename, dirname, join, resolve as resolvePath } from "path"
 import { homedir, platform } from "os"
-import { randomUUID } from "crypto"
 import { Database } from "bun:sqlite"
 import { execFileSync, execSync, spawn, type ChildProcess } from "child_process"
 import { fileURLToPath } from "url"
@@ -34,7 +33,6 @@ const LAST_NOTIFIED_PATH = join(SCHEDULER_DIR, "last-notified-at.txt")
 const NOTIFICATIONS_PATH = join(SCHEDULER_DIR, "notifications.jsonl")
 const NOTIFICATIONS_CURSOR_PATH = join(SCHEDULER_DIR, "notifications.cursor")
 const NOTIFICATIONS_DB_PATH = join(SCHEDULER_DIR, "scheduler.db")
-const CONSUMER_ID_PATH = join(SCHEDULER_DIR, "consumer.id")
 
 // Platform detection
 const IS_MAC = platform() === "darwin"
@@ -2691,23 +2689,10 @@ function saveNotificationsCursor(n: number): void {
 let notificationsCursor: number | null = null
 
 function getConsumerId(): string {
-  try {
-    if (existsSync(CONSUMER_ID_PATH)) {
-      const raw = readFileSync(CONSUMER_ID_PATH, "utf-8").trim()
-      if (raw.length > 0) return raw
-    }
-  } catch {}
-  const id = randomUUID()
-  try {
-    ensureDir(SCHEDULER_DIR)
-    writeFileSync(CONSUMER_ID_PATH, id, { mode: 0o600 })
-  } catch (err) {
-    console.error(
-      "[scheduler-ext] failed to persist consumer.id:",
-      err instanceof Error ? err.message : String(err),
-    )
-  }
-  return id
+  const envId = process.env.OPENCODE_SCHEDULER_CONSUMER_ID
+  if (envId && envId.length > 0) return envId
+  if (lastChatSessionId) return lastChatSessionId
+  return `proc-${process.pid}`
 }
 
 function getDb(): Database | null {

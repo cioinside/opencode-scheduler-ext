@@ -12338,7 +12338,6 @@ tool.schema = exports_external;
 import { appendFileSync, createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync, unlinkSync } from "fs";
 import { basename, dirname, join, resolve as resolvePath } from "path";
 import { homedir, platform } from "os";
-import { randomUUID } from "crypto";
 import { Database } from "bun:sqlite";
 import { execFileSync, execSync, spawn } from "child_process";
 import { fileURLToPath } from "url";
@@ -12360,7 +12359,6 @@ var LAST_NOTIFIED_PATH = join(SCHEDULER_DIR, "last-notified-at.txt");
 var NOTIFICATIONS_PATH = join(SCHEDULER_DIR, "notifications.jsonl");
 var NOTIFICATIONS_CURSOR_PATH = join(SCHEDULER_DIR, "notifications.cursor");
 var NOTIFICATIONS_DB_PATH = join(SCHEDULER_DIR, "scheduler.db");
-var CONSUMER_ID_PATH = join(SCHEDULER_DIR, "consumer.id");
 var IS_MAC = platform() === "darwin";
 var IS_LINUX = platform() === "linux";
 var IS_WINDOWS = platform() === "win32";
@@ -14454,21 +14452,12 @@ function saveNotificationsCursor(n) {
 }
 var notificationsCursor = null;
 function getConsumerId() {
-  try {
-    if (existsSync(CONSUMER_ID_PATH)) {
-      const raw = readFileSync(CONSUMER_ID_PATH, "utf-8").trim();
-      if (raw.length > 0)
-        return raw;
-    }
-  } catch {}
-  const id = randomUUID();
-  try {
-    ensureDir(SCHEDULER_DIR);
-    writeFileSync(CONSUMER_ID_PATH, id, { mode: 384 });
-  } catch (err) {
-    console.error("[scheduler-ext] failed to persist consumer.id:", err instanceof Error ? err.message : String(err));
-  }
-  return id;
+  const envId = process.env.OPENCODE_SCHEDULER_CONSUMER_ID;
+  if (envId && envId.length > 0)
+    return envId;
+  if (lastChatSessionId)
+    return lastChatSessionId;
+  return `proc-${process.pid}`;
 }
 function getDb() {
   try {
@@ -15660,4 +15649,4 @@ export {
   src_default as default
 };
 
-//# debugId=2445F38E29E3D02E64756E2164756E21
+//# debugId=0FFD3FE8DB449CC464756E2164756E21

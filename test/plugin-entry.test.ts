@@ -584,22 +584,39 @@ describe("Wave 8.3: bulletproof error handling — no unhandled promise rejectio
   })
 })
 
-describe("ext.13: SQLite-backed multi-consumer notification store", () => {
+describe("ext.13/ext.14: SQLite-backed multi-consumer notification store", () => {
   test("imports Database from bun:sqlite", () => {
     expect(SRC).toMatch(/import\s*\{\s*Database\s*\}\s*from\s*["']bun:sqlite["']/)
   })
 
-  test("NOTIFICATIONS_DB_PATH and CONSUMER_ID_PATH constants exist under SCHEDULER_DIR", () => {
+  test("NOTIFICATIONS_DB_PATH constant exists under SCHEDULER_DIR (ext.13)", () => {
     expect(SRC).toMatch(/NOTIFICATIONS_DB_PATH\s*=\s*join\(SCHEDULER_DIR\s*,\s*["']scheduler\.db["']\)/)
-    expect(SRC).toMatch(/CONSUMER_ID_PATH\s*=\s*join\(SCHEDULER_DIR\s*,\s*["']consumer\.id["']\)/)
   })
 
-  test("getConsumerId reads from CONSUMER_ID_PATH and falls back to randomUUID + writeFileSync", () => {
+  test("CONSUMER_ID_PATH file is REMOVED in ext.14 (no more file-based identity)", () => {
+    expect(SRC).not.toMatch(/CONSUMER_ID_PATH\s*=/)
+  })
+
+  test("getConsumerId uses OPENCODE_SCHEDULER_CONSUMER_ID env override first", () => {
     const body = extractFnBody("getConsumerId")
-    expect(body).toMatch(/existsSync\(CONSUMER_ID_PATH\)/)
-    expect(body).toMatch(/readFileSync\(CONSUMER_ID_PATH/)
-    expect(body).toMatch(/randomUUID/)
-    expect(body).toMatch(/writeFileSync\(CONSUMER_ID_PATH/)
+    expect(body).toMatch(/process\.env\.OPENCODE_SCHEDULER_CONSUMER_ID/)
+  })
+
+  test("getConsumerId falls back to lastChatSessionId (opencode TUI session id)", () => {
+    const body = extractFnBody("getConsumerId")
+    expect(body).toMatch(/lastChatSessionId/)
+  })
+
+  test("getConsumerId ultimate fallback is proc-${pid} (per-process identity)", () => {
+    const body = extractFnBody("getConsumerId")
+    expect(body).toMatch(/proc-\$\{process\.pid\}/)
+  })
+
+  test("getConsumerId no longer writes/reads any file", () => {
+    const body = extractFnBody("getConsumerId")
+    expect(body).not.toMatch(/writeFileSync/)
+    expect(body).not.toMatch(/readFileSync/)
+    expect(body).not.toMatch(/randomUUID/)
   })
 
   test("getDb opens Database with create:true + WAL mode + schema migration", () => {

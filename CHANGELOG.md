@@ -4,6 +4,61 @@ All notable changes to **opencode-scheduler-ext** are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.6.4-ext.14] — 2026-08-21
+
+### Changed (consumer identity = opencode session ID, no file)
+
+ext.13 stored consumer identity in a single file at
+`~/.config/opencode/scheduler/consumer.id`. That was effectively a
+single-consumer model under the user's `$HOME`: every TUI/CLI process
+under the same user shared one cursor row.
+
+ext.14 removes the file. The consumer identity is now:
+
+```ts
+function getConsumerId(): string {
+  const envId = process.env.OPENCODE_SCHEDULER_CONSUMER_ID
+  if (envId && envId.length > 0) return envId
+  if (lastChatSessionId) return lastChatSessionId
+  return `proc-${process.pid}`
+}
+```
+
+The identity is stored in SQLite as the `consumers.consumer_id` PK —
+no separate file. Each row's PK IS the identity.
+
+Identity sources (in priority order):
+
+1. `OPENCODE_SCHEDULER_CONSUMER_ID` env var — for CLI dashboards, web
+   hooks, or any process that wants a stable cross-restart identity
+   independent of an opencode session.
+2. `lastChatSessionId` (opencode TUI's current session ID) — the
+   default. Stable across `/continue` (same conversation, restart),
+   distinct across parallel sessions, distinct across new conversations.
+3. `proc-<pid>` fallback — used only between plugin load and the first
+   chat.message event in a fresh TUI session. Once a message arrives,
+   the row transitions to the real session ID; the fallback row becomes
+   a harmless orphan.
+
+Behavior:
+- Different conversations = different consumer_id = independent cursors.
+- Same conversation, restart = same consumer_id = no re-delivery.
+- Two parallel TUIs in different conversations = independent cursors.
+- Each cursor row tracks its own `last_id` in the `consumers` table;
+  the `consumers.consumer_id` PK is the storage location, replacing
+  ext.13's separate file.
+
+Migration:
+- ext.13's `~/.config/opencode/scheduler/consumer.id` is no longer
+  read or written. It can be safely deleted (the SQLite `consumers`
+  row keyed by that UUID will simply be orphaned, taking a few KB).
+- No data migration needed — DB schema unchanged from ext.13.
+
+Tests: 103/103 pass.
+
+Related: L14 lesson will be recorded in
+`experience-records/experience/opencode-scheduler-cross-home-multiroot/note-v13.md`.
+
 ## [1.6.4-ext.13] — 2026-08-21
 
 ### Changed (SQLite-backed multi-consumer notification store)
