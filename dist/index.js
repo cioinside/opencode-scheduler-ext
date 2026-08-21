@@ -13345,6 +13345,11 @@ function isCommandAvailable(command) {
     return false;
   }
 }
+function isFlockAvailable() {
+  if (!IS_LINUX)
+    return false;
+  return isCommandAvailable("flock");
+}
 function isSystemdUserAvailable() {
   if (!IS_LINUX)
     return false;
@@ -13446,7 +13451,15 @@ function createCronEntry(job) {
   const escapedJobPath = shellEscapeDoubleQuoted(jobPath);
   const escapedLogPath = shellEscapeDoubleQuoted(logFilePath);
   const escapedPath = shellEscapeDoubleQuoted(getEnhancedPath());
-  return `${job.schedule} PATH="${escapedPath}" /usr/bin/perl "${escapedSupervisor}" "${escapedJobPath}" >> "${escapedLogPath}" 2>&1`;
+  const flockPrefix = isFlockAvailable() ? `flock -n "${shellEscapeDoubleQuoted(join(scopeLocksDir(scopeId), ".global.lock"))}" ` : "";
+  return `${job.schedule} PATH="${escapedPath}" ${flockPrefix}/usr/bin/perl "${escapedSupervisor}" "${escapedJobPath}" >> "${escapedLogPath}" 2>&1`;
+}
+function ensureScopeGlobalLock(scopeId) {
+  const lockPath = join(scopeLocksDir(scopeId), ".global.lock");
+  ensureDir(scopeLocksDir(scopeId));
+  if (!existsSync(lockPath)) {
+    writeFileSync(lockPath, "", { mode: 420 });
+  }
 }
 function installCronJob(job) {
   if (!isCronAvailable()) {
@@ -13456,6 +13469,9 @@ function installCronJob(job) {
   const scopeId = job.scopeId || deriveScopeId(job.workdir || homedir());
   ensureDir(scopeLogsDir(scopeId));
   ensureSupervisorScript();
+  if (isFlockAvailable()) {
+    ensureScopeGlobalLock(scopeId);
+  }
   const blockId = cronBlockId(job);
   const current = readUserCrontab();
   const stripped = stripManagedCronBlocks(current, new Set([blockId, cronLegacyBlockId(job)]));
@@ -15455,4 +15471,4 @@ export {
   src_default as default
 };
 
-//# debugId=0DECABBAE32347AB64756E2164756E21
+//# debugId=E873C85C2CEE1C2464756E2164756E21

@@ -1304,6 +1304,11 @@ function isCommandAvailable(command: string): boolean {
   }
 }
 
+function isFlockAvailable(): boolean {
+  if (!IS_LINUX) return false
+  return isCommandAvailable("flock")
+}
+
 function isSystemdUserAvailable(): boolean {
   if (!IS_LINUX) return false
   if (!isCommandAvailable("systemctl")) return false
@@ -1416,7 +1421,25 @@ function createCronEntry(job: Job): string {
   const escapedLogPath = shellEscapeDoubleQuoted(logFilePath)
   const escapedPath = shellEscapeDoubleQuoted(getEnhancedPath())
 
-  return `${job.schedule} PATH="${escapedPath}" /usr/bin/perl "${escapedSupervisor}" "${escapedJobPath}" >> "${escapedLogPath}" 2>&1`
+  // Global concurrency gate: only ONE cron-driven supervisor instance runs at
+  // a time per scope. `flock -n` is non-blocking — if another job holds the
+  // lock, this cron tick skips silently (exit code != 0, but cron tolerates).
+  // This is the OS-level primitive version of the in-supervisor.pl flock
+  // patch (ext.9) — survives supervisor.pl regeneration by external tools
+  // (e.g. opencode agent re-applying the supervisor template).
+  const flockPrefix = isFlockAvailable()
+    ? `flock -n "${shellEscapeDoubleQuoted(join(scopeLocksDir(scopeId), ".global.lock"))}" `
+    : ""
+
+  return `${job.schedule} PATH="${escapedPath}" ${flockPrefix}/usr/bin/perl "${escapedSupervisor}" "${escapedJobPath}" >> "${escapedLogPath}" 2>&1`
+}
+
+function ensureScopeGlobalLock(scopeId: string): void {
+  const lockPath = join(scopeLocksDir(scopeId), ".global.lock")
+  ensureDir(scopeLocksDir(scopeId))
+  if (!existsSync(lockPath)) {
+    writeFileSync(lockPath, "", { mode: 0o644 })
+  }
 }
 
 function installCronJob(job: Job): void {
@@ -1428,6 +1451,9 @@ function installCronJob(job: Job): void {
   const scopeId = job.scopeId || deriveScopeId(job.workdir || homedir())
   ensureDir(scopeLogsDir(scopeId))
   ensureSupervisorScript()
+  if (isFlockAvailable()) {
+    ensureScopeGlobalLock(scopeId)
+  }
 
   const blockId = cronBlockId(job)
   const current = readUserCrontab()
