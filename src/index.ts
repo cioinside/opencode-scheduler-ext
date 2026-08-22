@@ -54,6 +54,23 @@ const WINDOWS_TASK_PREFIX = "opencode-job"
 // cron backend
 const CRON_MANAGED_PREFIX = "opencode-scheduler"
 
+const EXT_LOG_PATH = join(LOGS_DIR, "scheduler-ext.log")
+
+function logToFile(level: "info" | "warn" | "error", msg: string, err?: unknown) {
+  try {
+    ensureDir(LOGS_DIR)
+    const ts = new Date().toISOString()
+    const detail = err instanceof Error
+      ? ` | ${err.message}${err.stack ? `\n${err.stack}` : ""}`
+      : err !== undefined
+        ? ` | ${String(err)}`
+        : ""
+    appendFileSync(EXT_LOG_PATH, `[${ts}] [${level}] ${msg}${detail}\n`)
+  } catch {
+    // never throw from logger
+  }
+}
+
 // Ensure directory exists
 function ensureDir(dir: string) {
   if (!existsSync(dir)) {
@@ -2633,10 +2650,7 @@ async function emitBatchToast(records: RunRecord[]): Promise<void> {
       "emitBatchToast.showToast",
     )
   } catch (err) {
-    console.error(
-      "[scheduler-ext] emitBatchToast.showToast failed:",
-      err instanceof Error ? err.message : String(err),
-    )
+    logToFile("error", "emitBatchToast.showToast failed", err)
   }
 }
 
@@ -2650,10 +2664,7 @@ async function injectCompletionIntoPrompt(run: RunRecord): Promise<void> {
       "injectCompletionIntoPrompt.appendPrompt",
     )
   } catch (err) {
-    console.error(
-      "[scheduler-ext] injectCompletionIntoPrompt.appendPrompt failed:",
-      err instanceof Error ? err.message : String(err),
-    )
+    logToFile("error", "injectCompletionIntoPrompt.appendPrompt failed", err)
   }
 }
 
@@ -2682,10 +2693,7 @@ function appendNotificationsToFile(records: RunRecord[]): void {
       .join("\n") + "\n"
     appendFileSync(NOTIFICATIONS_PATH, lines)
   } catch (err) {
-    console.error(
-      "[scheduler-ext] appendNotificationsToFile failed:",
-      err instanceof Error ? err.message : String(err),
-    )
+    logToFile("error", "appendNotificationsToFile failed", err)
   }
 }
 
@@ -2738,10 +2746,7 @@ function getDb(): Database | null {
     `)
     return db
   } catch (err) {
-    console.error(
-      "[scheduler-ext] getDb failed:",
-      err instanceof Error ? err.message : String(err),
-    )
+    logToFile("error", "getDb failed", err)
     return null
   }
 }
@@ -2787,10 +2792,7 @@ function ingestJsonlToDb(db: Database): number {
   try {
     tx()
   } catch (err) {
-    console.error(
-      "[scheduler-ext] ingestJsonlToDb tx failed:",
-      err instanceof Error ? err.message : String(err),
-    )
+    logToFile("error", "ingestJsonlToDb tx failed", err)
     return 0
   }
   notificationsCursor = lines.length
@@ -2862,9 +2864,10 @@ async function deliverToTarget(
     }
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err)
-    console.warn(
-      `[scheduler-ext] deliverToTarget ${target}: session.prompt rejected (${reason}). ` +
-      `Notification may still be queued via /prompt_async — advancing cursor anyway to prevent retry spam.`,
+    logToFile(
+      "warn",
+      `deliverToTarget ${target}: session.prompt rejected (${reason}). ` +
+      `Notification may still be queued via /prompt_async — cursor advanced.`,
     )
   }
   const maxId = unconsumed[unconsumed.length - 1].id
@@ -2918,10 +2921,7 @@ async function pollNotificationsDbForConsumer(consumerId: string): Promise<void>
         )
       }
     } catch (err) {
-      console.error(
-        `[scheduler-ext] pollNotificationsDbForConsumer ${consumerId} failed:`,
-        err instanceof Error ? err.message : String(err),
-      )
+      logToFile("error", `pollNotificationsDbForConsumer ${consumerId} failed`, err)
       return
     }
     const maxId = records[records.length - 1].id
@@ -3027,11 +3027,7 @@ async function injectBatchIntoSession(sessionId: string, records: RunRecord[]): 
       "injectBatchIntoSession.session.prompt",
     )
   } catch (err) {
-    console.error(
-      "[scheduler-ext] injectBatchIntoSession failed for",
-      sessionId,
-      err instanceof Error ? err.message : String(err),
-    )
+    logToFile("error", `injectBatchIntoSession failed for ${sessionId}`, err)
   }
 }
 
@@ -3055,11 +3051,7 @@ async function triggerAgentOnSession(sessionId: string): Promise<void> {
       "triggerAgentOnSession.session.prompt",
     )
   } catch (err) {
-    console.error(
-      "[scheduler-ext] triggerAgentOnSession failed for",
-      sessionId,
-      err instanceof Error ? err.message : String(err),
-    )
+    logToFile("error", `triggerAgentOnSession failed for ${sessionId}`, err)
   }
 }
 
@@ -3109,10 +3101,7 @@ async function notifyCompletedRuns(): Promise<void> {
       "notifyCompletedRuns.total",
     )
   } catch (err) {
-    console.error(
-      "[scheduler-ext] notifyCompletedRuns internal error:",
-      err instanceof Error ? err.stack || err.message : String(err),
-    )
+    logToFile("error", "notifyCompletedRuns internal error", err)
   } finally {
     notifyInFlight = false
   }
@@ -3164,10 +3153,7 @@ async function autoNotifyOnResume(config?: SchedulerConfig): Promise<void> {
       "autoNotifyOnResume.total",
     )
   } catch (err) {
-    console.error(
-      "[scheduler-ext] autoNotifyOnResume internal error:",
-      err instanceof Error ? err.stack || err.message : String(err),
-    )
+    logToFile("error", "autoNotifyOnResume internal error", err)
   }
 }
 
@@ -3177,24 +3163,15 @@ function startBackgroundPoll(intervalSec: number): void {
   const useEnvOverride = !!envConsumerId && envConsumerId.length > 0
   pollTimer = setInterval(() => {
     void notifyCompletedRuns().catch((err) => {
-      console.error(
-        "[scheduler-ext] background poll tick rejected:",
-        err instanceof Error ? err.stack || err.message : String(err),
-      )
+      logToFile("error", "background poll tick rejected", err)
     })
     if (useEnvOverride) {
       void pollNotificationsDbForConsumer(envConsumerId).catch((err) => {
-        console.error(
-          "[scheduler-ext] notifications-db poll tick rejected (env-override):",
-          err instanceof Error ? err.stack || err.message : String(err),
-        )
+        logToFile("error", "notifications-db poll tick rejected (env-override)", err)
       })
     } else {
       void pollNotificationsDb().catch((err) => {
-        console.error(
-          "[scheduler-ext] notifications-db poll tick rejected (per-session):",
-          err instanceof Error ? err.stack || err.message : String(err),
-        )
+        logToFile("error", "notifications-db poll tick rejected (per-session)", err)
       })
     }
   }, intervalSec * 1000)
@@ -3469,8 +3446,9 @@ export const SchedulerPlugin: Plugin = async (input) => {
     }
   }
   const config = loadSchedulerConfig()
-  console.error(
-    `[scheduler-ext] plugin loaded, lastNotifiedAt=${lastNotifiedAt} pollIntervalSec=${config.autoNotify?.pollIntervalSec ?? 30}`,
+  logToFile(
+    "info",
+    `plugin loaded, lastNotifiedAt=${lastNotifiedAt} pollIntervalSec=${config.autoNotify?.pollIntervalSec ?? 30}`,
   )
   // Defer to next macrotask: entry Promise must resolve before any of our
   // server-bound or timer work starts (critical under server overload).
@@ -3482,10 +3460,7 @@ export const SchedulerPlugin: Plugin = async (input) => {
     if (isCliMode()) return
     setTimeout(() => {
       void autoNotifyOnResume(config).catch((err) => {
-        console.error(
-          "[scheduler-ext] autoNotifyOnResume rejected at plugin entry:",
-          err instanceof Error ? err.stack || err.message : String(err),
-        )
+        logToFile("error", "autoNotifyOnResume rejected at plugin entry", err)
       })
     }, 3000)
     startBackgroundPoll(config.autoNotify?.pollIntervalSec ?? 30)
@@ -3496,10 +3471,7 @@ export const SchedulerPlugin: Plugin = async (input) => {
       try {
         await notifyCompletedRuns()
       } catch (err) {
-        console.error(
-          "[scheduler-ext] chat.message handler error:",
-          err instanceof Error ? err.stack || err.message : String(err),
-        )
+        logToFile("error", "chat.message handler error", err)
       }
     },
     "tool.execute.before": async (input) => {
@@ -3509,10 +3481,7 @@ export const SchedulerPlugin: Plugin = async (input) => {
           lastToolSessionId = sid
         }
       } catch (err) {
-        console.error(
-          "[scheduler-ext] tool.execute.before handler error:",
-          err instanceof Error ? err.message : String(err),
-        )
+        logToFile("error", "tool.execute.before handler error", err)
       }
     },
     tool: {

@@ -4,6 +4,50 @@ All notable changes to **opencode-scheduler-ext** are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.6.4-ext.19] — 2026-08-22
+
+### Fixed (all console.* output goes to file, TUI stays clean)
+
+ext.16-18 still wrote `console.warn` / `console.error` from background
+poll code. The opencode TUI captures **all** stdout/stderr from plugins
+and renders it as inline chat messages — so every delivery timeout,
+every background poll tick rejection, every hook error appeared in
+the user's chat UI, polluting it with debug noise.
+
+Fix: introduced `logToFile(level, msg, err?)` helper that writes to
+`~/.config/opencode/logs/scheduler-ext.log` with ISO timestamps.
+Replaced **18** console.error/warn calls in plugin code (background
+poll, hook handlers, delivery, DB ops, toast, inject, trigger) with
+`logToFile`. The plugin entry startup line ("plugin loaded, ...")
+also moved from console.error to logToFile("info", ...).
+
+After this change, the TUI shows only what the user actually typed
+or what the agent responded. All scheduler diagnostics are silent
+unless the user inspects the log file.
+
+```ts
+function logToFile(level: "info" | "warn" | "error", msg: string, err?: unknown) {
+  try {
+    ensureDir(LOGS_DIR)
+    const ts = new Date().toISOString()
+    const detail = err instanceof Error
+      ? ` | ${err.message}${err.stack ? `\n${err.stack}` : ""}`
+      : err !== undefined ? ` | ${String(err)}` : ""
+    appendFileSync(EXT_LOG_PATH, `[${ts}] [${level}] ${msg}${detail}\n`)
+  } catch {
+    // never throw from logger
+  }
+}
+```
+
+Tests updated: 10 regex patterns in `Wave 8.3` suite changed from
+`console\.error\([^)]*<keyword>` to `logToFile\(\s*["']error["'],\s*[\`"'][^\`"']*<keyword>`.
+99/99 tests pass.
+
+Files changed: `src/index.ts` (added `EXT_LOG_PATH` const + `logToFile`
+helper, replaced 18 console calls), `test/plugin-entry.test.ts`
+(updated 10 assertions).
+
 ## [1.6.4-ext.18] — 2026-08-21
 
 ### Fixed (collapse two-line warn into single message)

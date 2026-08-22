@@ -12369,6 +12369,17 @@ var SYSTEMD_USER_DIR = join(homedir(), ".config", "systemd", "user");
 var WINDOWS_TASK_ROOT = "\\OpenCode";
 var WINDOWS_TASK_PREFIX = "opencode-job";
 var CRON_MANAGED_PREFIX = "opencode-scheduler";
+var EXT_LOG_PATH = join(LOGS_DIR, "scheduler-ext.log");
+function logToFile(level, msg, err) {
+  try {
+    ensureDir(LOGS_DIR);
+    const ts = new Date().toISOString();
+    const detail = err instanceof Error ? ` | ${err.message}${err.stack ? `
+${err.stack}` : ""}` : err !== undefined ? ` | ${String(err)}` : "";
+    appendFileSync(EXT_LOG_PATH, `[${ts}] [${level}] ${msg}${detail}
+`);
+  } catch {}
+}
 function ensureDir(dir) {
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true });
@@ -14425,7 +14436,7 @@ async function emitBatchToast(records) {
       duration: 5000
     }), PLUGIN_CLIENT_TIMEOUT_MS, "emitBatchToast.showToast");
   } catch (err) {
-    console.error("[scheduler-ext] emitBatchToast.showToast failed:", err instanceof Error ? err.message : String(err));
+    logToFile("error", "emitBatchToast.showToast failed", err);
   }
 }
 async function injectBatchIntoPrompt(records) {
@@ -14451,7 +14462,7 @@ function appendNotificationsToFile(records) {
 `;
     appendFileSync(NOTIFICATIONS_PATH, lines);
   } catch (err) {
-    console.error("[scheduler-ext] appendNotificationsToFile failed:", err instanceof Error ? err.message : String(err));
+    logToFile("error", "appendNotificationsToFile failed", err);
   }
 }
 function loadNotificationsCursor() {
@@ -14498,7 +14509,7 @@ function getDb() {
     `);
     return db;
   } catch (err) {
-    console.error("[scheduler-ext] getDb failed:", err instanceof Error ? err.message : String(err));
+    logToFile("error", "getDb failed", err);
     return null;
   }
 }
@@ -14535,7 +14546,7 @@ function ingestJsonlToDb(db) {
   try {
     tx();
   } catch (err) {
-    console.error("[scheduler-ext] ingestJsonlToDb tx failed:", err instanceof Error ? err.message : String(err));
+    logToFile("error", "ingestJsonlToDb tx failed", err);
     return 0;
   }
   notificationsCursor = lines.length;
@@ -14591,7 +14602,7 @@ async function deliverToTarget(db, target, allRecords) {
     }
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
-    console.warn(`[scheduler-ext] deliverToTarget ${target}: session.prompt rejected (${reason}). ` + `Notification may still be queued via /prompt_async \u2014 advancing cursor anyway to prevent retry spam.`);
+    logToFile("warn", `deliverToTarget ${target}: session.prompt rejected (${reason}). ` + `Notification may still be queued via /prompt_async \u2014 cursor advanced.`);
   }
   const maxId = unconsumed[unconsumed.length - 1].id;
   db.prepare(`INSERT INTO consumers (consumer_id, last_id, updated_at)
@@ -14630,7 +14641,7 @@ async function pollNotificationsDbForConsumer(consumerId) {
         await withTimeout(pluginClient.tui.appendPrompt({ text: summary }), PLUGIN_CLIENT_TIMEOUT_MS, "pollNotificationsDbForConsumer.tui");
       }
     } catch (err) {
-      console.error(`[scheduler-ext] pollNotificationsDbForConsumer ${consumerId} failed:`, err instanceof Error ? err.message : String(err));
+      logToFile("error", `pollNotificationsDbForConsumer ${consumerId} failed`, err);
       return;
     }
     const maxId = records[records.length - 1].id;
@@ -14721,7 +14732,7 @@ async function injectBatchIntoSession(sessionId, records) {
       body: { parts: [{ type: "text", text: summary }] }
     }), PLUGIN_CLIENT_TIMEOUT_MS, "injectBatchIntoSession.session.prompt");
   } catch (err) {
-    console.error("[scheduler-ext] injectBatchIntoSession failed for", sessionId, err instanceof Error ? err.message : String(err));
+    logToFile("error", `injectBatchIntoSession failed for ${sessionId}`, err);
   }
 }
 async function triggerAgentOnSession(sessionId) {
@@ -14742,7 +14753,7 @@ async function triggerAgentOnSession(sessionId) {
       }
     }), PLUGIN_CLIENT_TIMEOUT_MS, "triggerAgentOnSession.session.prompt");
   } catch (err) {
-    console.error("[scheduler-ext] triggerAgentOnSession failed for", sessionId, err instanceof Error ? err.message : String(err));
+    logToFile("error", `triggerAgentOnSession failed for ${sessionId}`, err);
   }
 }
 async function notifyCompletedRuns() {
@@ -14784,7 +14795,7 @@ async function notifyCompletedRuns() {
       saveLastNotified(maxFinishedAt);
     })(), PLUGIN_CLIENT_TOTAL_TIMEOUT_MS, "notifyCompletedRuns.total");
   } catch (err) {
-    console.error("[scheduler-ext] notifyCompletedRuns internal error:", err instanceof Error ? err.stack || err.message : String(err));
+    logToFile("error", "notifyCompletedRuns internal error", err);
   } finally {
     notifyInFlight = false;
   }
@@ -14829,7 +14840,7 @@ async function autoNotifyOnResume(config2) {
       saveLastNotified(maxFinishedAt);
     })(), PLUGIN_CLIENT_TOTAL_TIMEOUT_MS, "autoNotifyOnResume.total");
   } catch (err) {
-    console.error("[scheduler-ext] autoNotifyOnResume internal error:", err instanceof Error ? err.stack || err.message : String(err));
+    logToFile("error", "autoNotifyOnResume internal error", err);
   }
 }
 function startBackgroundPoll(intervalSec) {
@@ -14839,15 +14850,15 @@ function startBackgroundPoll(intervalSec) {
   const useEnvOverride = !!envConsumerId && envConsumerId.length > 0;
   pollTimer = setInterval(() => {
     notifyCompletedRuns().catch((err) => {
-      console.error("[scheduler-ext] background poll tick rejected:", err instanceof Error ? err.stack || err.message : String(err));
+      logToFile("error", "background poll tick rejected", err);
     });
     if (useEnvOverride) {
       pollNotificationsDbForConsumer(envConsumerId).catch((err) => {
-        console.error("[scheduler-ext] notifications-db poll tick rejected (env-override):", err instanceof Error ? err.stack || err.message : String(err));
+        logToFile("error", "notifications-db poll tick rejected (env-override)", err);
       });
     } else {
       pollNotificationsDb().catch((err) => {
-        console.error("[scheduler-ext] notifications-db poll tick rejected (per-session):", err instanceof Error ? err.stack || err.message : String(err));
+        logToFile("error", "notifications-db poll tick rejected (per-session)", err);
       });
     }
   }, intervalSec * 1000);
@@ -15086,13 +15097,13 @@ var SchedulerPlugin = async (input) => {
     }
   }
   const config2 = loadSchedulerConfig();
-  console.error(`[scheduler-ext] plugin loaded, lastNotifiedAt=${lastNotifiedAt} pollIntervalSec=${config2.autoNotify?.pollIntervalSec ?? 30}`);
+  logToFile("info", `plugin loaded, lastNotifiedAt=${lastNotifiedAt} pollIntervalSec=${config2.autoNotify?.pollIntervalSec ?? 30}`);
   setImmediate(() => {
     if (isCliMode())
       return;
     setTimeout(() => {
       autoNotifyOnResume(config2).catch((err) => {
-        console.error("[scheduler-ext] autoNotifyOnResume rejected at plugin entry:", err instanceof Error ? err.stack || err.message : String(err));
+        logToFile("error", "autoNotifyOnResume rejected at plugin entry", err);
       });
     }, 3000);
     startBackgroundPoll(config2.autoNotify?.pollIntervalSec ?? 30);
@@ -15103,7 +15114,7 @@ var SchedulerPlugin = async (input) => {
       try {
         await notifyCompletedRuns();
       } catch (err) {
-        console.error("[scheduler-ext] chat.message handler error:", err instanceof Error ? err.stack || err.message : String(err));
+        logToFile("error", "chat.message handler error", err);
       }
     },
     "tool.execute.before": async (input2) => {
@@ -15113,7 +15124,7 @@ var SchedulerPlugin = async (input) => {
           lastToolSessionId = sid;
         }
       } catch (err) {
-        console.error("[scheduler-ext] tool.execute.before handler error:", err instanceof Error ? err.message : String(err));
+        logToFile("error", "tool.execute.before handler error", err);
       }
     },
     tool: {
@@ -15732,4 +15743,4 @@ export {
   src_default as default
 };
 
-//# debugId=161982221023A47864756E2164756E21
+//# debugId=9959BC6FF431622964756E2164756E21

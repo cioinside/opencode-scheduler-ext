@@ -502,20 +502,20 @@ describe("Wave 8.3: bulletproof error handling — no unhandled promise rejectio
   test("injectBatchIntoSession logs error on session.prompt failure", () => {
     const body = functionBody(/async function injectBatchIntoSession\([^)]*\)\s*:\s*Promise<void>\s*\{/)
     expect(body).toMatch(/catch\s*\(\s*err\s*\)/)
-    expect(body).toMatch(/console\.error\([^)]*injectBatchIntoSession failed/)
+    expect(body).toMatch(/logToFile\(\s*["']error["'],\s*[`"'][^`"']*injectBatchIntoSession failed/)
   })
 
   test("triggerAgentOnSession logs error on session.prompt failure", () => {
     const body = functionBody(/async function triggerAgentOnSession\([^)]*\)\s*:\s*Promise<void>\s*\{/)
     expect(body).toMatch(/catch\s*\(\s*err\s*\)/)
-    expect(body).toMatch(/console\.error\([^)]*triggerAgentOnSession failed/)
+    expect(body).toMatch(/logToFile\(\s*["']error["'],\s*[`"'][^`"']*triggerAgentOnSession failed/)
   })
 
   test("notifyCompletedRuns body now has catch clause (was try/finally only)", () => {
     const body = functionBody(/(?:export\s+)?async function notifyCompletedRuns\([^)]*\)\s*:\s*Promise<void>\s*\{/)
     expect(body).toMatch(/try\s*\{/)
     expect(body).toMatch(/\}\s*catch\s*\(\s*err\s*\)/)
-    expect(body).toMatch(/console\.error\([^)]*notifyCompletedRuns internal error/)
+    expect(body).toMatch(/logToFile\(["']error["'],\s*["'][^"']*notifyCompletedRuns internal error/)
     expect(body).toMatch(/finally\s*\{[\s\S]*?notifyInFlight\s*=\s*false[\s\S]*?\}/)
   })
 
@@ -523,7 +523,7 @@ describe("Wave 8.3: bulletproof error handling — no unhandled promise rejectio
     const body = functionBody(/async function autoNotifyOnResume\([^)]*\)\s*:\s*Promise<void>\s*\{/)
     expect(body).toMatch(/try\s*\{/)
     expect(body).toMatch(/\}\s*catch\s*\(\s*err\s*\)/)
-    expect(body).toMatch(/console\.error\([^)]*autoNotifyOnResume internal error/)
+    expect(body).toMatch(/logToFile\(["']error["'],\s*["'][^"']*autoNotifyOnResume internal error/)
   })
 
   test("chat.message handler is wrapped in try/catch so unhandled rejections cannot crash TUI", () => {
@@ -536,7 +536,7 @@ describe("Wave 8.3: bulletproof error handling — no unhandled promise rejectio
     expect(inner).toMatch(/try\s*\{/)
     expect(inner).toMatch(/await\s+notifyCompletedRuns\(\)/)
     expect(inner).toMatch(/\}\s*catch\s*\(\s*err\s*\)/)
-    expect(inner).toMatch(/console\.error\([^)]*chat\.message handler error/)
+    expect(inner).toMatch(/logToFile\(["']error["'],\s*["'][^"']*chat\.message handler error/)
   })
 
   test("tool.execute.before handler is wrapped in try/catch", () => {
@@ -548,14 +548,14 @@ describe("Wave 8.3: bulletproof error handling — no unhandled promise rejectio
     const inner = hook![1]
     expect(inner).toMatch(/try\s*\{/)
     expect(inner).toMatch(/\}\s*catch\s*\(\s*err\s*\)/)
-    expect(inner).toMatch(/console\.error\([^)]*tool\.execute\.before handler error/)
+    expect(inner).toMatch(/logToFile\(["']error["'],\s*["'][^"']*tool\.execute\.before handler error/)
   })
 
   test("startBackgroundPoll setInterval callback has .catch() on the void notifyCompletedRuns() promise", () => {
     const body = functionBody(/function startBackgroundPoll\([^)]*\)\s*:\s*void\s*\{/)
     expect(body).toMatch(/setInterval\s*\(/)
     expect(body).toMatch(/void\s+notifyCompletedRuns\(\)\s*\.\s*catch\s*\(/)
-    expect(body).toMatch(/console\.error\([^)]*background poll tick rejected/)
+    expect(body).toMatch(/logToFile\(["']error["'],\s*["'][^"']*background poll tick rejected/)
   })
 
   test("plugin entry fires void autoNotifyOnResume(config) with .catch() handler", () => {
@@ -563,13 +563,13 @@ describe("Wave 8.3: bulletproof error handling — no unhandled promise rejectio
     expect(body).toMatch(
       /void\s+autoNotifyOnResume\s*\(\s*config\s*\)\s*\.\s*catch\s*\(/,
     )
-    expect(body).toMatch(/console\.error\([^)]*autoNotifyOnResume rejected at plugin entry/)
+    expect(body).toMatch(/logToFile\(["']error["'],\s*["'][^"']*autoNotifyOnResume rejected at plugin entry/)
   })
 
   test("emitBatchToast logs error on showToast failure (was silent)", () => {
     const body = functionBody(/async function emitBatchToast\([^)]*\)\s*:\s*Promise<void>\s*\{/)
     expect(body).toMatch(/catch\s*\(\s*err\s*\)/)
-    expect(body).toMatch(/console\.error\([^)]*emitBatchToast\.showToast failed/)
+    expect(body).toMatch(/logToFile\(["']error["'],\s*["'][^"']*emitBatchToast\.showToast failed/)
   })
 
   test("injectBatchIntoPrompt delegates to appendNotificationsToFile (ext.12 file-based)", () => {
@@ -580,7 +580,7 @@ describe("Wave 8.3: bulletproof error handling — no unhandled promise rejectio
 
   test("plugin entry logs diagnostic info on load (lastNotifiedAt + pollIntervalSec)", () => {
     const body = pluginBody()
-    expect(body).toMatch(/console\.error\([^)]*plugin loaded, lastNotifiedAt=/)
+    expect(body).toMatch(/logToFile\(\s*["']info["'],\s*[`"'][^`"']*plugin loaded, lastNotifiedAt=/)
   })
 })
 
