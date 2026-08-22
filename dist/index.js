@@ -15105,8 +15105,14 @@ var SchedulerPlugin = async (input) => {
   }
   const config2 = loadSchedulerConfig();
   logToFile("info", `plugin loaded, lastNotifiedAt=${lastNotifiedAt} pollIntervalSec=${config2.autoNotify?.pollIntervalSec ?? 30}`);
+  const isChildProcess = !!process.env.OPENCODE_SCHEDULER_RUN_ID;
+  if (isChildProcess) {
+    logToFile("info", `child mode (runId=${process.env.OPENCODE_SCHEDULER_RUN_ID}): polling and resume skipped`);
+  }
   setImmediate(() => {
     if (isCliMode())
+      return;
+    if (isChildProcess)
       return;
     setTimeout(() => {
       autoNotifyOnResume(config2).catch((err) => {
@@ -15750,4 +15756,4 @@ export {
   src_default as default
 };
 
-//# debugId=22A83B120559759464756E2164756E21
+//# debugId=01A93A5D7D1EF16C64756E2164756E21

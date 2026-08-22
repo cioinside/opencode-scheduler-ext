@@ -4,6 +4,57 @@ All notable changes to **opencode-scheduler-ext** are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.6.4-ext.22] — 2026-08-22
+
+### Fixed (disable polling in cron-driven child processes)
+
+Architectural bug: when a job is launched via `supervisor.pl` →
+`opencode run -- <prompt>`, the child process loads the scheduler-ext
+plugin (because it's in the user's `opencode.jsonc `"plugin"` array).
+The plugin's background poll reads `notifications.db`, groups
+notifications by `getJobSessionIdForDelivery`, and tries to deliver
+each group to its target session via `pluginClient.session.prompt`.
+
+Problem: the child has its own ephemeral opencode-server. Its
+`pluginClient` only knows about ITS sessions. The `job.sessionId`
+points to the user's TUI session — which the child's server does not
+recognize. Result: every poll tick hits
+`POST /session/{TUI-id}/prompt_async` → 404 "Session not found" →
+unhandled rejection → child exits with code 1 in ~2 seconds.
+
+Observed: scalper-market-scan failed in 2.6s, 2.5s, 1.4s
+consistently. scalper-cycle-check worked because the agent had
+manually added `--pure` to its invocation.args (which disables
+external plugins, including scheduler-ext, in the child).
+
+Fix: detect child mode via `OPENCODE_SCHEDULER_RUN_ID` env var
+(supervisor.pl already sets this on every run) and skip
+`startBackgroundPoll` + `autoNotifyOnResume` in that case:
+
+```ts
+const isChildProcess = !!process.env.OPENCODE_SCHEDULER_RUN_ID
+if (isChildProcess) {
+  logToFile("info", `child mode (runId=...): polling skipped`)
+}
+setImmediate(() => {
+  if (isCliMode()) return
+  if (isChildProcess) return      // NEW
+  setTimeout(() => autoNotifyOnResume(config), 3000)
+  startBackgroundPoll(...)
+})
+```
+
+Effect:
+- Child: prompt runs normally, supervisor.pl writes notification
+  line (ext.12), child exits 0 cleanly
+- Parent (TUI/web): polls notifications.db and delivers to its own
+  session via ITS plugin client (which knows about TUI session)
+
+This makes `--pure` unnecessary for jobs — the plugin self-disables
+in child mode. Existing jobs with `--pure` keep working (no-op).
+
+99/99 tests pass.
+
 ## [1.6.4-ext.21] — 2026-08-22
 
 ### Fixed (DEFAULT_TIMEOUT_SECONDS=600 in supervisor.pl template)

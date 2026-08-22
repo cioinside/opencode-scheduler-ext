@@ -3463,8 +3463,24 @@ export const SchedulerPlugin: Plugin = async (input) => {
   // CLI commands (`opencode mcp list`, etc.) — which don't have an active
   // session to inject into — exit cleanly without waiting for our HTTP work.
   // TUI sessions stay alive past 3s, so the call still fires there.
+  // ext.22: if running as cron-driven supervisor child (detected by
+  // OPENCODE_SCHEDULER_RUN_ID env var set by supervisor.pl), skip BOTH
+  // autoNotifyOnResume and startBackgroundPoll. Child has its own ephemeral
+  // opencode-server; its plugin client only knows about ITS own sessions.
+  // Trying to deliver notifications to a different session (e.g. the user's
+  // TUI) would 404 with "Session not found" and crash the child.
+  // The parent process (TUI/web) is responsible for delivery — child only
+  // runs the prompt and writes to notifications.jsonl/DB.
+  const isChildProcess = !!process.env.OPENCODE_SCHEDULER_RUN_ID
+  if (isChildProcess) {
+    logToFile(
+      "info",
+      `child mode (runId=${process.env.OPENCODE_SCHEDULER_RUN_ID}): polling and resume skipped`,
+    )
+  }
   setImmediate(() => {
     if (isCliMode()) return
+    if (isChildProcess) return
     setTimeout(() => {
       void autoNotifyOnResume(config).catch((err) => {
         logToFile("error", "autoNotifyOnResume rejected at plugin entry", err)
