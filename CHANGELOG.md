@@ -4,6 +4,42 @@ All notable changes to **opencode-scheduler-ext** are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.6.4-ext.20] — 2026-08-22
+
+### Added (default timeoutSeconds = 600 for new jobs)
+
+The scheduler plugin's `schedule_job` tool accepted an optional
+`timeoutSeconds` argument, but if omitted the field stayed undefined
+→ supervisor.pl ran the child with no `alarm()` → child could run
+indefinitely, blocking the flock lock and starving subsequent cron
+ticks.
+
+In one real run the agent (prompt: "После завершения цикла начни
+следующий") ran for 10+ minutes in a single opencode process, holding
+the lock for 5+ subsequent cron ticks.
+
+Fix: introduced `DEFAULT_TIMEOUT_SECONDS = 600` constant, applied
+at two points:
+
+1. `loadJob` normalizer: any existing job without `timeoutSeconds`
+   now loads with the default applied (existing on-disk jobs get
+   the default when read).
+2. `schedule_job` executor: `timeoutSeconds: args.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS`
+   in the newly-built Job object.
+
+Behavior:
+- New jobs created via `schedule_job`: default 600s (10 min)
+- Existing jobs loaded from disk: default 600s applied if missing
+- User can still override: pass `timeoutSeconds: 0` to disable,
+  or any positive integer to change
+- `update_job` unchanged: explicitly-set values preserved, omitted
+  values left alone (existing job.timeoutSeconds is not touched)
+
+supervisor.pl already supports the field via `alarm($timeout)` →
+SIGTERM → SIGKILL fallback. No changes needed there.
+
+99/99 tests pass.
+
 ## [1.6.4-ext.19] — 2026-08-22
 
 ### Fixed (all console.* output goes to file, TUI stays clean)

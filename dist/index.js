@@ -12360,6 +12360,7 @@ var NOTIFICATIONS_PATH = join(SCHEDULER_DIR, "notifications.jsonl");
 var NOTIFICATIONS_CURSOR_PATH = join(SCHEDULER_DIR, "notifications.cursor");
 var NOTIFICATIONS_DB_PATH = join(SCHEDULER_DIR, "scheduler.db");
 var TUI_FALLBACK_TARGET = "__tui_fallback__";
+var DEFAULT_TIMEOUT_SECONDS = 600;
 var IS_MAC = platform() === "darwin";
 var IS_LINUX = platform() === "linux";
 var IS_WINDOWS = platform() === "win32";
@@ -14045,7 +14046,7 @@ function normalizeJob(raw) {
     schedule: raw.schedule,
     source: typeof raw.source === "string" ? raw.source : undefined,
     workdir: typeof raw.workdir === "string" ? raw.workdir : undefined,
-    timeoutSeconds: typeof raw.timeoutSeconds === "number" ? raw.timeoutSeconds : undefined,
+    timeoutSeconds: typeof raw.timeoutSeconds === "number" ? raw.timeoutSeconds : DEFAULT_TIMEOUT_SECONDS,
     createdAt: typeof raw.createdAt === "string" ? raw.createdAt : new Date().toISOString(),
     updatedAt: typeof raw.updatedAt === "string" ? raw.updatedAt : undefined,
     lastRunAt: typeof raw.lastRunAt === "string" ? raw.lastRunAt : undefined,
@@ -15224,7 +15225,7 @@ var SchedulerPlugin = async (input) => {
             source: args.source,
             workdir,
             attachUrl,
-            timeoutSeconds: args.timeoutSeconds,
+            timeoutSeconds: args.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS,
             sessionId,
             createdAt: new Date().toISOString()
           };
@@ -15743,4 +15744,4 @@ export {
   src_default as default
 };
 
-//# debugId=9959BC6FF431622964756E2164756E21
+//# debugId=249F4B1F3578EFE564756E2164756E21

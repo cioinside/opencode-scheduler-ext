@@ -34,6 +34,7 @@ const NOTIFICATIONS_PATH = join(SCHEDULER_DIR, "notifications.jsonl")
 const NOTIFICATIONS_CURSOR_PATH = join(SCHEDULER_DIR, "notifications.cursor")
 const NOTIFICATIONS_DB_PATH = join(SCHEDULER_DIR, "scheduler.db")
 const TUI_FALLBACK_TARGET = "__tui_fallback__"
+const DEFAULT_TIMEOUT_SECONDS = 600
 
 // Platform detection
 const IS_MAC = platform() === "darwin"
@@ -2145,7 +2146,7 @@ function normalizeJob(raw: unknown): Job | null {
     schedule: raw.schedule,
     source: typeof raw.source === "string" ? raw.source : undefined,
     workdir: typeof raw.workdir === "string" ? raw.workdir : undefined,
-    timeoutSeconds: typeof raw.timeoutSeconds === "number" ? raw.timeoutSeconds : undefined,
+    timeoutSeconds: typeof raw.timeoutSeconds === "number" ? raw.timeoutSeconds : DEFAULT_TIMEOUT_SECONDS,
     createdAt: typeof raw.createdAt === "string" ? raw.createdAt : new Date().toISOString(),
     updatedAt: typeof raw.updatedAt === "string" ? raw.updatedAt : undefined,
     lastRunAt: typeof raw.lastRunAt === "string" ? raw.lastRunAt : undefined,
@@ -3618,7 +3619,7 @@ export const SchedulerPlugin: Plugin = async (input) => {
               source: args.source,
               workdir,
               attachUrl,
-              timeoutSeconds: args.timeoutSeconds,
+              timeoutSeconds: args.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS,
               sessionId,
               createdAt: new Date().toISOString(),
             }
