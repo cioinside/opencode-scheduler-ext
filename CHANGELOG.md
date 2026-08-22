@@ -4,6 +4,34 @@ All notable changes to **opencode-scheduler-ext** are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.6.4-ext.23] — 2026-08-22
+
+### Fixed (fallback delivery: session.prompt → tui.appendPrompt)
+
+When `pluginClient.session.prompt({id: TUI_session})` fails (timeout,
+"Session not found", 404, etc.), `deliverToTarget` now retries via
+`pluginClient.tui.appendPrompt({text: summary})` instead of just
+logging a warning and advancing the consumer's cursor.
+
+Without this, a session that is renamed, restarted, or where the
+session-prompt endpoint stalls permanently blocks delivery: the
+consumer's `last_id` advances on every fail (ext.17) and the user
+sees nothing — but the scheduler keeps writing notifications and
+the fallback consumer (`__tui_fallback__`) keeps swallowing them
+silently in `appendPrompt`.
+
+With ext.23:
+1. Primary delivery attempt: `session.prompt` (5s timeout).
+2. On fail: log info, retry via `tui.appendPrompt`.
+3. On retry fail: log warn with both reasons, advance cursor.
+4. On retry success: log info, advance cursor — the user sees the
+   summary in their TUI input box.
+
+This unblocks the user when the TUI session-id recorded in a job
+no longer resolves cleanly on the opencode server side (e.g. the
+session was deleted server-side but the consumer row still points
+at it).
+
 ## [1.6.4-ext.22] — 2026-08-22
 
 ### Fixed (disable polling in cron-driven child processes)

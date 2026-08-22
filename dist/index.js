@@ -14598,6 +14598,8 @@ async function deliverToTarget(db, target, allRecords) {
   if (unconsumed.length === 0)
     return;
   const summary = formatBatchSummary(unconsumed);
+  let delivered = false;
+  let lastReason = "";
   try {
     if (target === TUI_FALLBACK_TARGET) {
       await withTimeout(pluginClient?.tui.appendPrompt({ text: summary }), PLUGIN_CLIENT_TIMEOUT_MS, "deliverToTarget.tui");
@@ -14607,9 +14609,22 @@ async function deliverToTarget(db, target, allRecords) {
         body: { parts: [{ type: "text", text: summary }] }
       }), PLUGIN_CLIENT_TIMEOUT_MS, "deliverToTarget.session");
     }
+    delivered = true;
   } catch (err) {
-    const reason = err instanceof Error ? err.message : String(err);
-    logToFile("warn", `deliverToTarget ${target}: session.prompt rejected (${reason}). ` + `Notification may still be queued via /prompt_async \u2014 cursor advanced.`);
+    lastReason = err instanceof Error ? err.message : String(err);
+  }
+  if (!delivered && target !== TUI_FALLBACK_TARGET) {
+    logToFile("info", `deliverToTarget ${target}: primary session.prompt failed (${lastReason}); retrying via tui fallback`);
+    try {
+      await withTimeout(pluginClient?.tui.appendPrompt({ text: summary }), PLUGIN_CLIENT_TIMEOUT_MS, "deliverToTarget.tui_fallback");
+      delivered = true;
+      logToFile("info", `deliverToTarget ${target}: tui fallback delivered successfully`);
+    } catch (err) {
+      lastReason = err instanceof Error ? err.message : String(err);
+    }
+  }
+  if (!delivered) {
+    logToFile("warn", `deliverToTarget ${target}: all delivery attempts failed (${lastReason}). Cursor advanced.`);
   }
   const maxId = unconsumed[unconsumed.length - 1].id;
   db.prepare(`INSERT INTO consumers (consumer_id, last_id, updated_at)
@@ -15756,4 +15771,4 @@ export {
   src_default as default
 };
 
-//# debugId=01A93A5D7D1EF16C64756E2164756E21
+//# debugId=5846146D88B3549964756E2164756E21

@@ -2852,6 +2852,9 @@ async function deliverToTarget(
   const unconsumed = allRecords.filter((r) => r.id > lastId)
   if (unconsumed.length === 0) return
   const summary = formatBatchSummary(unconsumed)
+  let delivered = false
+  let lastReason = ""
+  // Primary delivery: tui.appendPrompt for fallback target, session.prompt otherwise.
   try {
     if (target === TUI_FALLBACK_TARGET) {
       await withTimeout(
@@ -2869,12 +2872,35 @@ async function deliverToTarget(
         "deliverToTarget.session",
       )
     }
+    delivered = true
   } catch (err) {
-    const reason = err instanceof Error ? err.message : String(err)
+    lastReason = err instanceof Error ? err.message : String(err)
+  }
+  // ext.23: if session.prompt was the primary and it failed (timeout, "Session not found",
+  // 404, etc.), retry via tui.appendPrompt so the user actually sees the summary in their
+  // TUI input box. Without this, a stuck or renamed session permanently blocks delivery —
+  // the consumer's cursor advances on every fail and the user gets nothing.
+  if (!delivered && target !== TUI_FALLBACK_TARGET) {
+    logToFile(
+      "info",
+      `deliverToTarget ${target}: primary session.prompt failed (${lastReason}); retrying via tui fallback`,
+    )
+    try {
+      await withTimeout(
+        pluginClient?.tui.appendPrompt({ text: summary }),
+        PLUGIN_CLIENT_TIMEOUT_MS,
+        "deliverToTarget.tui_fallback",
+      )
+      delivered = true
+      logToFile("info", `deliverToTarget ${target}: tui fallback delivered successfully`)
+    } catch (err) {
+      lastReason = err instanceof Error ? err.message : String(err)
+    }
+  }
+  if (!delivered) {
     logToFile(
       "warn",
-      `deliverToTarget ${target}: session.prompt rejected (${reason}). ` +
-      `Notification may still be queued via /prompt_async — cursor advanced.`,
+      `deliverToTarget ${target}: all delivery attempts failed (${lastReason}). Cursor advanced.`,
     )
   }
   const maxId = unconsumed[unconsumed.length - 1].id
