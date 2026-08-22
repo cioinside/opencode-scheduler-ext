@@ -157,6 +157,11 @@ use Time::HiRes qw(time);
 
 # opencode-scheduler supervisor v1
 
+# Default child timeout (10 minutes). Applied when job.timeoutSeconds
+# is missing or not a non-negative integer. Override per-job by setting
+# timeoutSeconds in the job JSON (0 disables).
+my $DEFAULT_TIMEOUT_SECONDS = 600;
+
 sub iso_now {
   my @t = localtime(time());
   return strftime("%Y-%m-%dT%H:%M:%S%z", @t);
@@ -286,7 +291,8 @@ my @args = @{ $inv->{args} };
 my $workdir = $job->{workdir} || $home;
 
 my $timeout = $job->{timeoutSeconds};
-$timeout = undef if defined($timeout) && $timeout !~ /^\\d+$/;
+$timeout = $DEFAULT_TIMEOUT_SECONDS if !defined($timeout);
+$timeout = undef if defined($timeout) && $timeout !~ /^\d+$/;
 
 my $timed_out = 0;
 my $child_pid = fork();

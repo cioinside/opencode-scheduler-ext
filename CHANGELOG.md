@@ -4,6 +4,50 @@ All notable changes to **opencode-scheduler-ext** are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.6.4-ext.21] — 2026-08-22
+
+### Fixed (DEFAULT_TIMEOUT_SECONDS=600 in supervisor.pl template)
+
+ext.20 applied the default timeout only in TypeScript (`loadJob`
+normalizer + `schedule_job` executor). But supervisor.pl reads job.json
+directly from disk — it doesn't know about the TS constant. Result:
+
+- TUI (with ext.20 loaded) → in-memory job has timeoutSeconds=600
+- supervisor.pl (always uses on-disk job.json) → timeoutSeconds undefined
+- On second run, supervisor overwrites job.json with `lastRunStatus`
+  etc., **losing** the manual `timeoutSeconds: 600` we set in ext.20
+
+Observed: scalper-cycle-check.json had `timeoutSeconds: null` after
+the 14:00 run, even though we had manually edited the file in 10:52.
+Same for scalper-market-scan (newly created, never had timeout).
+
+Risk: if the agent prompt enters a loop (e.g. "start next cycle"),
+the child runs indefinitely, holds flock, and starves subsequent
+cron ticks.
+
+Fix: added the same default to supervisor.pl's own template:
+
+```perl
+# opencode-scheduler supervisor v1
+my $DEFAULT_TIMEOUT_SECONDS = 600;
+...
+my $timeout = $job->{timeoutSeconds};
+$timeout = $DEFAULT_TIMEOUT_SECONDS if !defined($timeout);
+$timeout = undef if defined($timeout) && $timeout !~ /^\d+$/;
+```
+
+Now:
+- TypeScript (ext.20): in-memory default for plugin consumers
+- Perl supervisor (ext.21): on-disk default for actual execution
+- Both agree on 600s, both agree that `timeoutSeconds: 0` disables
+
+The supervisor template literal in `src/index.ts` was updated, so any
+newly-installed/regenerated supervisor.pl will have the default. The
+currently-running `/home/user/.config/opencode/scheduler/supervisor.pl`
+was patched in place (backup at `supervisor.pl.bak`).
+
+99/99 tests pass.
+
 ## [1.6.4-ext.20] — 2026-08-22
 
 ### Added (default timeoutSeconds = 600 for new jobs)
