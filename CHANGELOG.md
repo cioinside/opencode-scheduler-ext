@@ -4,6 +4,39 @@ All notable changes to **opencode-scheduler-ext** are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.6.4-ext.18] — 2026-08-21
+
+### Fixed (collapse two-line warn into single message)
+
+ext.17 logged `console.warn(formatted_msg, err.message)` — Node prints
+each argument as a separate line, so the user saw TWO log lines per
+delivery rejection:
+
+```
+[scheduler-ext] deliverToTarget X: session.prompt rejected (...): X
+[scheduler-ext] deliverToTarget.session timed out after 5000ms
+```
+
+The second line is the underlying error from `withTimeout` (the
+`/prompt_async` call took >5s, e.g. server waited for session to
+accept the prompt). Both lines describe ONE event — they should
+be one line.
+
+Fix: concatenate the error message INTO the formatted string instead
+of passing it as a separate argument. Single line, no information loss:
+
+```ts
+} catch (err) {
+  const reason = err instanceof Error ? err.message : String(err)
+  console.warn(
+    `[scheduler-ext] deliverToTarget ${target}: session.prompt rejected (${reason}). ` +
+    `Notification may still be queued via /prompt_async — advancing cursor anyway to prevent retry spam.`,
+  )
+}
+```
+
+No behavior change. Cursor advance unchanged (ext.17). 99/99 tests pass.
+
 ## [1.6.4-ext.17] — 2026-08-21
 
 ### Fixed (advance cursor on session.prompt rejection — /prompt_async is fire-and-forget)

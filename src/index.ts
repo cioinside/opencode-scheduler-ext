@@ -2861,9 +2861,10 @@ async function deliverToTarget(
       )
     }
   } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err)
     console.warn(
-      `[scheduler-ext] deliverToTarget ${target}: session.prompt rejected (notification may still be queued via /prompt_async — advancing cursor anyway to prevent retry spam):`,
-      err instanceof Error ? err.message : String(err),
+      `[scheduler-ext] deliverToTarget ${target}: session.prompt rejected (${reason}). ` +
+      `Notification may still be queued via /prompt_async — advancing cursor anyway to prevent retry spam.`,
     )
   }
   const maxId = unconsumed[unconsumed.length - 1].id
