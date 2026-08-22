@@ -2861,8 +2861,8 @@ async function deliverToTarget(
       )
     }
   } catch (err) {
-    console.error(
-      `[scheduler-ext] deliverToTarget ${target} failed:`,
+    console.warn(
+      `[scheduler-ext] deliverToTarget ${target}: session.prompt rejected (notification may still be queued via /prompt_async, retry next tick):`,
       err instanceof Error ? err.message : String(err),
     )
     return

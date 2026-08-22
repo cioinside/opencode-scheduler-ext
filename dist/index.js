@@ -14590,7 +14590,7 @@ async function deliverToTarget(db, target, allRecords) {
       }), PLUGIN_CLIENT_TIMEOUT_MS, "deliverToTarget.session");
     }
   } catch (err) {
-    console.error(`[scheduler-ext] deliverToTarget ${target} failed:`, err instanceof Error ? err.message : String(err));
+    console.warn(`[scheduler-ext] deliverToTarget ${target}: session.prompt rejected (notification may still be queued via /prompt_async, retry next tick):`, err instanceof Error ? err.message : String(err));
     return;
   }
   const maxId = unconsumed[unconsumed.length - 1].id;
@@ -15732,4 +15732,4 @@ export {
   src_default as default
 };
 
-//# debugId=7DA57B9BFFA2012264756E2164756E21
+//# debugId=8D8A476A701DD66664756E2164756E21

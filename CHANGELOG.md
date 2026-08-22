@@ -4,6 +4,40 @@ All notable changes to **opencode-scheduler-ext** are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.6.4-ext.16] — 2026-08-21
+
+### Changed (downgrade deliverToTarget log level — /prompt_async is fire-and-forget)
+
+ext.15's `deliverToTarget` logged `console.error("[scheduler-ext]
+deliverToTarget X failed: ...")` whenever `pluginClient.session.prompt`
+rejected — even though the underlying SDK call (`POST /session/{id}/prompt_async`)
+is fire-and-forget: the prompt is queued server-side as soon as the
+request is accepted, but the server can still return a non-2xx (or
+the SDK can throw on edge cases like a body parse quirk) AFTER the
+prompt was actually delivered.
+
+Symptom: notification arrives in the user's TUI session, but a red
+`console.error` line appears in the TUI log — alarming without being
+an actual error.
+
+Fix: downgrade to `console.warn` and clarify that the prompt may
+still have been queued via /prompt_async. Cursor is NOT advanced
+on failure, so the next tick retries — eventually succeeding when
+the session state stabilises.
+
+```ts
+} catch (err) {
+  console.warn(
+    `[scheduler-ext] deliverToTarget ${target}: session.prompt rejected
+     (notification may still be queued via /prompt_async, retry next tick):`,
+    err instanceof Error ? err.message : String(err),
+  )
+  return  // don't advance cursor, retry
+}
+```
+
+No new tests (single-line log-level change, behavior unchanged).
+
 ## [1.6.4-ext.15] — 2026-08-21
 
 ### Changed (per-session routing — each notification → its creator session)
