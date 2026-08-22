@@ -4,6 +4,59 @@ All notable changes to **opencode-scheduler-ext** are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.6.4-ext.17] — 2026-08-21
+
+### Fixed (advance cursor on session.prompt rejection — /prompt_async is fire-and-forget)
+
+ext.16 downgraded the log level but kept the cursor-not-advanced
+behavior. In practice that creates an infinite retry spam: every
+30s `pollNotificationsDb` retries the same notification, the SDK
+keeps rejecting on the same edge-case race, the user keeps seeing
+the notification injected into the agent's session (because the
+server DID queue the prompt — /prompt_async is fire-and-forget),
+and the agent re-processes the same job result indefinitely.
+
+Symptom (reported by user):
+```
+[scheduler-ext] 1 job completed since last check [OK] scalper-monitor-5min ...
++ Thought: 2.3s
+e job_logs [name=scalper-monitor-5min, lines=80]
++ Thought: 14.5s
+e trading-mcp-broker_get_account
+[scheduler-ext] 1 job completed since last check [OK] scalper-monitor-5min ...
++ Thought: 2.3s
+e job_logs [name=scalper-monitor-5min, lines=50]
+[scheduler-ext] 1 job completed since last check [OK] scalper-monitor-5min ...
+```
+
+Fix: advance the cursor even when session.prompt rejects. /prompt_async
+is fire-and-forget — once the request is accepted (2xx), the prompt
+is queued server-side and will be delivered regardless of what the
+SDK does with the response. The warning stays so the user can
+investigate if delivery actually fails server-side, but no retry
+spam.
+
+Trade-off: if the session is permanently dead (4xx from server,
+session truly doesn't exist), we'd lose the notification instead of
+retrying forever. The warn log makes this visible — user can
+inspect DB and re-create the job if needed.
+
+```ts
+} catch (err) {
+  console.warn(
+    `[scheduler-ext] deliverToTarget ${target}: session.prompt rejected
+     (notification may still be queued via /prompt_async — advancing
+     cursor anyway to prevent retry spam):`,
+    err instanceof Error ? err.message : String(err),
+  )
+  // fall through — advance cursor anyway
+}
+const maxId = unconsumed[unconsumed.length - 1].id
+db.prepare(`INSERT INTO consumers ... ON CONFLICT ... DO UPDATE SET ...`).run(...)
+```
+
+No new tests (single-line cursor-behavior change, log-level unchanged from ext.16).
+
 ## [1.6.4-ext.16] — 2026-08-21
 
 ### Changed (downgrade deliverToTarget log level — /prompt_async is fire-and-forget)

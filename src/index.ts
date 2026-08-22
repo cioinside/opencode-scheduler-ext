@@ -2862,10 +2862,9 @@ async function deliverToTarget(
     }
   } catch (err) {
     console.warn(
-      `[scheduler-ext] deliverToTarget ${target}: session.prompt rejected (notification may still be queued via /prompt_async, retry next tick):`,
+      `[scheduler-ext] deliverToTarget ${target}: session.prompt rejected (notification may still be queued via /prompt_async — advancing cursor anyway to prevent retry spam):`,
       err instanceof Error ? err.message : String(err),
     )
-    return
   }
   const maxId = unconsumed[unconsumed.length - 1].id
   db.prepare(

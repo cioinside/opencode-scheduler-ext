@@ -14590,8 +14590,7 @@ async function deliverToTarget(db, target, allRecords) {
       }), PLUGIN_CLIENT_TIMEOUT_MS, "deliverToTarget.session");
     }
   } catch (err) {
-    console.warn(`[scheduler-ext] deliverToTarget ${target}: session.prompt rejected (notification may still be queued via /prompt_async, retry next tick):`, err instanceof Error ? err.message : String(err));
-    return;
+    console.warn(`[scheduler-ext] deliverToTarget ${target}: session.prompt rejected (notification may still be queued via /prompt_async \u2014 advancing cursor anyway to prevent retry spam):`, err instanceof Error ? err.message : String(err));
   }
   const maxId = unconsumed[unconsumed.length - 1].id;
   db.prepare(`INSERT INTO consumers (consumer_id, last_id, updated_at)
@@ -15732,4 +15731,4 @@ export {
   src_default as default
 };
 
-//# debugId=8D8A476A701DD66664756E2164756E21
+//# debugId=7F88D3E4CAD9ED1564756E2164756E21
