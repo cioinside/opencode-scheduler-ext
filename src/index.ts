@@ -13,7 +13,7 @@
  */
 import type { Plugin } from "@opencode-ai/plugin"
 import { tool } from "@opencode-ai/plugin"
-import { appendFileSync, createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync, unlinkSync } from "fs"
+import { appendFileSync, createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync, unlinkSync } from "fs"
 import { basename, dirname, join, resolve as resolvePath } from "path"
 import { homedir, platform } from "os"
 import { Database } from "bun:sqlite"
@@ -35,6 +35,10 @@ const NOTIFICATIONS_CURSOR_PATH = join(SCHEDULER_DIR, "notifications.cursor")
 const NOTIFICATIONS_DB_PATH = join(SCHEDULER_DIR, "scheduler.db")
 const TUI_FALLBACK_TARGET = "__tui_fallback__"
 const DEFAULT_TIMEOUT_SECONDS = 600
+// ext.25: path to our own compiled bundle, watched for hot-reload detection.
+// We can't actually reload in-process (opencode loads plugins once at startup),
+// but we can notify the user when a new bundle is on disk so they know to restart.
+const EXT_DIST_PATH = fileURLToPath(import.meta.url)
 
 // Platform detection
 const IS_MAC = platform() === "darwin"
@@ -3200,6 +3204,14 @@ function startBackgroundPoll(intervalSec: number): void {
   if (pollTimer || intervalSec <= 0) return
   const envConsumerId = process.env.OPENCODE_SCHEDULER_CONSUMER_ID
   const useEnvOverride = !!envConsumerId && envConsumerId.length > 0
+  // ext.25: watch our own dist/index.js for changes. If it changes (because
+  // we or someone else redeployed the plugin), send a one-shot notification
+  // to each TUI session so the user knows a restart is needed. opencode has
+  // no built-in plugin-reload API — plugins load once at process start. The
+  // user must restart the TUI (or web) for the new code to take effect.
+  let lastWatchedMtime = 0
+  let lastWatchedSize = 0
+  let reloadNotifiedAt = 0
   pollTimer = setInterval(() => {
     void notifyCompletedRuns().catch((err) => {
       logToFile("error", "background poll tick rejected", err)
@@ -3213,6 +3225,28 @@ function startBackgroundPoll(intervalSec: number): void {
         logToFile("error", "notifications-db poll tick rejected (per-session)", err)
       })
     }
+    // ext.25: detect dist/index.js change (mtime + size). Cheap — single fs.stat.
+    try {
+      const stat = statSync(EXT_DIST_PATH)
+      if (
+        lastWatchedMtime > 0 &&
+        (stat.mtimeMs !== lastWatchedMtime || stat.size !== lastWatchedSize) &&
+        Date.now() - reloadNotifiedAt > 60_000
+      ) {
+        reloadNotifiedAt = Date.now()
+        logToFile(
+          "info",
+          `[hot-reload] dist/index.js changed (mtime ${lastWatchedMtime}→${stat.mtimeMs}, size ${lastWatchedSize}→${stat.size}). Restart TUI to apply.`,
+        )
+        void notifyHotReloadAvailable().catch((err) => {
+          logToFile("error", "notifyHotReloadAvailable failed", err)
+        })
+      }
+      lastWatchedMtime = stat.mtimeMs
+      lastWatchedSize = stat.size
+    } catch (err) {
+      // dist file missing — ignore silently
+    }
   }, intervalSec * 1000)
   // Required: unref() so opencode CLI commands (`mcp list` etc.) can exit; without it the interval keeps Node alive.
   pollTimer.unref()
@@ -3222,6 +3256,49 @@ function stopBackgroundPoll(): void {
   if (!pollTimer) return
   clearInterval(pollTimer)
   pollTimer = null
+}
+
+// ext.25: send a one-shot "hot reload available" hint to every TUI session
+// that has ever been seen. Reuses session.promptAsync — same path as the
+// notification delivery, no TUI input box overwrite. Rate-limited to once
+// per 60s by the caller.
+async function notifyHotReloadAvailable(): Promise<void> {
+  if (!pluginClient) return
+  const db = getDb()
+  if (!db) return
+  try {
+    const stmt = db.prepare(
+      `SELECT DISTINCT consumer_id FROM consumers
+       WHERE consumer_id NOT LIKE '\\_tui\\_%' ESCAPE '\\'`,
+    )
+    const rows = stmt.all() as Array<{ consumer_id: string }>
+    const ts = new Date().toISOString()
+    const text =
+      `[scheduler-ext] 🔄 hot-reload: a new dist/index.js was deployed at ${ts}. ` +
+      `Restart the TUI to apply (opencode plugins load once at process start; ` +
+      `there is no in-process reload API).`
+    for (const { consumer_id } of rows) {
+      if (consumer_id === TUI_FALLBACK_TARGET) continue
+      try {
+        await withTimeout(
+          pluginClient.session.promptAsync({
+            path: { id: consumer_id },
+            body: { parts: [{ type: "text", text }] },
+          }),
+          PLUGIN_CLIENT_TIMEOUT_MS,
+          "hotReloadAvailable.session",
+        )
+        logToFile("info", `[hot-reload] notified session=${consumer_id}`)
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err)
+        logToFile("warn", `[hot-reload] notify ${consumer_id} failed: ${reason}`)
+      }
+    }
+  } finally {
+    try {
+      db.close()
+    } catch {}
+  }
 }
 
 function runJobNow(job: Job): { startedAt: string; logPath: string; pid?: number; job: Job | null } {

@@ -12335,7 +12335,7 @@ function tool(input) {
 }
 tool.schema = exports_external;
 // src/index.ts
-import { appendFileSync, createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync, unlinkSync } from "fs";
+import { appendFileSync, createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync, unlinkSync } from "fs";
 import { basename, dirname, join, resolve as resolvePath } from "path";
 import { homedir, platform } from "os";
 import { Database } from "bun:sqlite";
@@ -12361,6 +12361,7 @@ var NOTIFICATIONS_CURSOR_PATH = join(SCHEDULER_DIR, "notifications.cursor");
 var NOTIFICATIONS_DB_PATH = join(SCHEDULER_DIR, "scheduler.db");
 var TUI_FALLBACK_TARGET = "__tui_fallback__";
 var DEFAULT_TIMEOUT_SECONDS = 600;
+var EXT_DIST_PATH = fileURLToPath(import.meta.url);
 var IS_MAC = platform() === "darwin";
 var IS_LINUX = platform() === "linux";
 var IS_WINDOWS = platform() === "win32";
@@ -14870,6 +14871,9 @@ function startBackgroundPoll(intervalSec) {
     return;
   const envConsumerId = process.env.OPENCODE_SCHEDULER_CONSUMER_ID;
   const useEnvOverride = !!envConsumerId && envConsumerId.length > 0;
+  let lastWatchedMtime = 0;
+  let lastWatchedSize = 0;
+  let reloadNotifiedAt = 0;
   pollTimer = setInterval(() => {
     notifyCompletedRuns().catch((err) => {
       logToFile("error", "background poll tick rejected", err);
@@ -14883,8 +14887,52 @@ function startBackgroundPoll(intervalSec) {
         logToFile("error", "notifications-db poll tick rejected (per-session)", err);
       });
     }
+    try {
+      const stat = statSync(EXT_DIST_PATH);
+      if (lastWatchedMtime > 0 && (stat.mtimeMs !== lastWatchedMtime || stat.size !== lastWatchedSize) && Date.now() - reloadNotifiedAt > 60000) {
+        reloadNotifiedAt = Date.now();
+        logToFile("info", `[hot-reload] dist/index.js changed (mtime ${lastWatchedMtime}\u2192${stat.mtimeMs}, size ${lastWatchedSize}\u2192${stat.size}). Restart TUI to apply.`);
+        notifyHotReloadAvailable().catch((err) => {
+          logToFile("error", "notifyHotReloadAvailable failed", err);
+        });
+      }
+      lastWatchedMtime = stat.mtimeMs;
+      lastWatchedSize = stat.size;
+    } catch (err) {}
   }, intervalSec * 1000);
   pollTimer.unref();
+}
+async function notifyHotReloadAvailable() {
+  if (!pluginClient)
+    return;
+  const db = getDb();
+  if (!db)
+    return;
+  try {
+    const stmt = db.prepare(`SELECT DISTINCT consumer_id FROM consumers
+       WHERE consumer_id NOT LIKE '\\_tui\\_%' ESCAPE '\\'`);
+    const rows = stmt.all();
+    const ts = new Date().toISOString();
+    const text = `[scheduler-ext] \uD83D\uDD04 hot-reload: a new dist/index.js was deployed at ${ts}. ` + `Restart the TUI to apply (opencode plugins load once at process start; ` + `there is no in-process reload API).`;
+    for (const { consumer_id } of rows) {
+      if (consumer_id === TUI_FALLBACK_TARGET)
+        continue;
+      try {
+        await withTimeout(pluginClient.session.promptAsync({
+          path: { id: consumer_id },
+          body: { parts: [{ type: "text", text }] }
+        }), PLUGIN_CLIENT_TIMEOUT_MS, "hotReloadAvailable.session");
+        logToFile("info", `[hot-reload] notified session=${consumer_id}`);
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        logToFile("warn", `[hot-reload] notify ${consumer_id} failed: ${reason}`);
+      }
+    }
+  } finally {
+    try {
+      db.close();
+    } catch {}
+  }
 }
 function runJobNow(job) {
   ensureDir(LOGS_DIR);
@@ -15771,4 +15819,4 @@ export {
   src_default as default
 };
 
-//# debugId=CD3FA7D8FFEC6B1964756E2164756E21
+//# debugId=24A71A927F4DEC1E64756E2164756E21

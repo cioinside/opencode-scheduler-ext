@@ -4,6 +4,34 @@ All notable changes to **opencode-scheduler-ext** are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.6.4-ext.25] — 2026-08-23
+
+### Added (hot-reload detection + user-facing restart hint)
+
+opencode loads plugins once at process start and provides no
+in-process reload API. Before ext.25, redeploying the bundle meant
+silently running old code until the user restarted the TUI.
+
+Now: every poll tick the plugin stats its own `dist/index.js`
+(mtime + size). If either changes, it sends a one-shot message via
+`session.promptAsync` to every known consumer session:
+
+```
+[scheduler-ext] 🔄 hot-reload: a new dist/index.js was deployed
+at 2026-08-23T...Z. Restart the TUI to apply (opencode plugins
+load once at process start; there is no in-process reload API).
+```
+
+Rate-limited to once per 60s so a deploy that writes the file in
+two `mv` steps only fires one notification. Consumers matching the
+fallback target (`__tui_fallback__`) are skipped — they have no real
+session ID.
+
+Limitations: this is detection + notification only. The actual
+reload still requires a TUI restart. We do NOT call `process.exit`
+from the watcher because opencode does not respawn the plugin
+after it dies — the entire opencode process exits with it.
+
 ## [1.6.4-ext.24] — 2026-08-23
 
 ### Fixed (use promptAsync instead of prompt for primary delivery)
