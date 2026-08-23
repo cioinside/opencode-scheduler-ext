@@ -2854,7 +2854,13 @@ async function deliverToTarget(
   const summary = formatBatchSummary(unconsumed)
   let delivered = false
   let lastReason = ""
-  // Primary delivery: tui.appendPrompt for fallback target, session.prompt otherwise.
+  // Primary delivery:
+  //  - tui.appendPrompt for fallback target (legacy fallback consumer)
+  //  - session.promptAsync for named sessions: fire-and-forget POST /prompt_async.
+  //    The server queues the message and returns 202 immediately; the agent processes
+  //    it asynchronously. We don't wait for the agent to finish — that was the ext.18
+  //    bug (5s timeout because the agent was busy in TUI). promptAsync returns in
+  //    ~10-50ms regardless of agent state.
   try {
     if (target === TUI_FALLBACK_TARGET) {
       await withTimeout(
@@ -2864,26 +2870,26 @@ async function deliverToTarget(
       )
     } else {
       await withTimeout(
-        pluginClient?.session.prompt({
+        pluginClient?.session.promptAsync({
           path: { id: target },
           body: { parts: [{ type: "text", text: summary }] },
         }),
         PLUGIN_CLIENT_TIMEOUT_MS,
-        "deliverToTarget.session",
+        "deliverToTarget.session_async",
       )
     }
     delivered = true
   } catch (err) {
     lastReason = err instanceof Error ? err.message : String(err)
   }
-  // ext.23: if session.prompt was the primary and it failed (timeout, "Session not found",
-  // 404, etc.), retry via tui.appendPrompt so the user actually sees the summary in their
-  // TUI input box. Without this, a stuck or renamed session permanently blocks delivery —
-  // the consumer's cursor advances on every fail and the user gets nothing.
+  // ext.23/24: if primary delivery failed, retry via tui.appendPrompt so the user
+  // actually sees the summary in their TUI input box. Order matters — appendPrompt
+  // can lose text if called twice in rapid succession (it overwrites, not appends),
+  // so we only call it once as the final fallback after both primary attempts.
   if (!delivered && target !== TUI_FALLBACK_TARGET) {
     logToFile(
       "info",
-      `deliverToTarget ${target}: primary session.prompt failed (${lastReason}); retrying via tui fallback`,
+      `deliverToTarget ${target}: primary session.promptAsync failed (${lastReason}); retrying via tui fallback`,
     )
     try {
       await withTimeout(

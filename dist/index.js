@@ -14604,17 +14604,17 @@ async function deliverToTarget(db, target, allRecords) {
     if (target === TUI_FALLBACK_TARGET) {
       await withTimeout(pluginClient?.tui.appendPrompt({ text: summary }), PLUGIN_CLIENT_TIMEOUT_MS, "deliverToTarget.tui");
     } else {
-      await withTimeout(pluginClient?.session.prompt({
+      await withTimeout(pluginClient?.session.promptAsync({
         path: { id: target },
         body: { parts: [{ type: "text", text: summary }] }
-      }), PLUGIN_CLIENT_TIMEOUT_MS, "deliverToTarget.session");
+      }), PLUGIN_CLIENT_TIMEOUT_MS, "deliverToTarget.session_async");
     }
     delivered = true;
   } catch (err) {
     lastReason = err instanceof Error ? err.message : String(err);
   }
   if (!delivered && target !== TUI_FALLBACK_TARGET) {
-    logToFile("info", `deliverToTarget ${target}: primary session.prompt failed (${lastReason}); retrying via tui fallback`);
+    logToFile("info", `deliverToTarget ${target}: primary session.promptAsync failed (${lastReason}); retrying via tui fallback`);
     try {
       await withTimeout(pluginClient?.tui.appendPrompt({ text: summary }), PLUGIN_CLIENT_TIMEOUT_MS, "deliverToTarget.tui_fallback");
       delivered = true;
@@ -15771,4 +15771,4 @@ export {
   src_default as default
 };
 
-//# debugId=5846146D88B3549964756E2164756E21
+//# debugId=CD3FA7D8FFEC6B1964756E2164756E21

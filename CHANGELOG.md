@@ -4,6 +4,36 @@ All notable changes to **opencode-scheduler-ext** are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.6.4-ext.24] — 2026-08-23
+
+### Fixed (use promptAsync instead of prompt for primary delivery)
+
+The ext.23 fallback chain (`session.prompt` → `tui.appendPrompt`)
+worked in theory but in practice:
+
+1. `session.prompt` synchronously waits for the agent to reply. The TUI
+   agent is usually busy chatting with the user, so the request sits
+   in the server queue until our 5s timeout fires. Result: every
+   notification timed out and we fell through to the TUI fallback.
+2. `tui.appendPrompt` overwrites the input buffer instead of
+   appending, so two notifications arriving in quick succession
+   produced only one visible text in the TUI input box.
+
+Fix: switch primary delivery from `session.prompt` (synchronous,
+waits for agent) to `session.promptAsync` (fire-and-forget POST).
+The server accepts the prompt and returns 202 in ~10-50ms — the
+agent picks it up from its own queue whenever it's free. This:
+
+- Eliminates the 5s timeout on the delivery path.
+- Posts the message directly into the session chat (the agent then
+  sees it as a user prompt and can react to it).
+- Doesn't compete with the TUI input buffer — the user can keep
+  typing without their text being clobbered.
+
+`session.promptAsync` failures still fall back to `tui.appendPrompt`
+(ext.23), so a dead session ID will still surface the summary
+somewhere.
+
 ## [1.6.4-ext.23] — 2026-08-22
 
 ### Fixed (fallback delivery: session.prompt → tui.appendPrompt)
